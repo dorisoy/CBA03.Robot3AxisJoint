@@ -1,10 +1,9 @@
-# HostComputer：CBA03 三轴位置台架上位机
+# CBA03.Robot3AxisJoint 三轴位置台架上位机
 
 面向自动跟随口腔灯研发的 Windows 桌面上位机，通过 USB2CAN / SLCAN 控制 CBA03 电机，支持逐轴手动位置控制，以及从 GeminiMaxRobot 网页接收 J1/J2/J3 目标的 AI 视觉随动。
 
 本文依据本目录现行源码、启动脚本和已有离线验证记录编写。源码、已构建程序、发布包、正在运行的视觉服务以及电机已烧录固件是不同对象，不能仅凭目录名称认定它们版本一致。
 
-> 本项目是研发台架软件，不是已完成医疗器械或机械安全认证的产品。当前程序按“固定空载台架”处理，不再要求全局重复勾选空载确认；这不是对实际负载、安装或安全状态的自动检测。真实接线、使能、运动和故障清除必须由现场人员确认。软件急停不能代替独立硬件急停。
 
 ## 目录
 
@@ -445,6 +444,8 @@ JSON 导出本身不续租、不发令，按导出时的 UI 已消费快照冻�
 
 ### 重点字段
 
+`capturedAt、node、snapshot、logs` 位于根对象；其余诊断项位于 `diagnostics` 下。表中 `axis.*` 和 `transport.*` 分别指 `diagnostics.axis.*`、`diagnostics.transport.*`；部分单元格省略共同前缀。
+
 | JSON 字段 | 用途 |
 | --- | --- |
 | `capturedAt、node、snapshot` | 导出时间、所选轴、参数来源/读回缓存 |
@@ -540,7 +541,7 @@ npm.cmd --prefix $WebRoot run build
 
 ### 已有验证记录的解释
 
-本文核对的最近记录：[Python](artifacts/verification/python-tests.json) 为 231 项通过、`hardwareAccess=false`；[桌面 TRX](artifacts/verification/desktop.trx) 为 429 项通过、0 失败。它们对应已有源码回归，不是编写本文时重新运行的测试，也不是实机验收。
+本文核对的最近记录：[Python](artifacts/verification/python-tests.json) 为 231 项通过、`hardwareAccess=false`；[桌面 TRX](artifacts/verification/desktop.trx) 为 429 项通过、0 失败。它们对应已有源码回归，不是编写本文时重新运行的测试，也不是实机验收。编写本文期间另行执行了源码入口 `Start.ps1 -CheckOnly`，检查通过，未启动应用或打开设备。
 
 测试数量随源码变化，仅作为该次记录；后续以执行退出码、JSON success、TRX 结果、生成时间与实际加载源码为准。历史 `build-Publish.json` 或 `release-smoke.json` 不能证明当前源码已发布或现场故障已消失。
 
