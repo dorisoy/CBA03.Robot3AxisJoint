@@ -23,14 +23,14 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
     private long leaseSubmitted, leaseCompleted;
     private readonly Queue<JsonElement> uiLeaseHistory = new();
     private JsonElement? firstUiProtection;
-    private long nextCurveAt;
+    private long nextCurveAt, nextProtectionDetailsAt;
     private const string StaleBridgeMessage = "桥接状态过期，停止续约；实机停机状态须检查。";
     private bool preparingPosition;
     private bool portsPending, disposed;
     private long nextPortsAt;
     private bool updatingPorts;
     private bool authorizationValid = true;
-    private string motorProtectionReason = "", motorStopResult = "";
+    private string motorProtectionReason = "", motorProtectionSummary = "", motorStopResult = "";
     private readonly HashSet<int> motorProtectionNodes = [];
     private long intentRevision;
     private long acknowledgedTargetRevision = -1;
@@ -88,7 +88,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         7. 0～67V 是截图保护设置，不是供电建议；截图已标定不等于实机已标定。图示相间 R/L 不直接换算到固件单相参数。
         8. 首次实机验收待单独授权：只读核对已连接节点，逐轴 1° 验证方向、单位、反馈和停止。三轴全部就绪才开放三轴联动。
         9. 增减节点须先停止并断开重连；失联节点本会话不自动恢复。运行中已授权轴掉线仍触发组停机。
-        10. 视觉随动：相机观测经网页解算为 J1/J2/J3，固定对应 ID1/ID2/ID3。AI 模式点击本轴“启动”即显式授权该映射：复用 RAM 准备、静止参考、响应核验，捕获当前 J 角基准后仅使能本轴并跟随；其他轴不会启动。配对只预览，不自动运动；切窗保留新采集发布，真实采集超过300ms仍停机。多轴分步确认入口保留。
+        10. 视觉随动：相机观测经网页解算为 J1/J2/J3，固定对应 ID1/ID2/ID3。AI 模式点击本轴“启动”即显式授权该映射：复用 RAM 准备、静止参考、响应核验，捕获当前 J 角基准后仅使能本轴并跟随；其他轴不会启动。自动订阅只预览，不自动运动；切窗保留新采集发布，原采集超过300ms减速保持等待，同流稳定新帧自动继续。未接管且新鲜反馈确认门极关闭的故障轴仅阻断本轴；受控、启动中或输出未核验轴故障仍保护。多轴分步确认入口保留。
         """);
     [ObservableProperty] private string port = "";
     [ObservableProperty] private bool connected;
@@ -107,6 +107,50 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
     [ObservableProperty] private string timing = "周期 —  /  UI 租约 50ms";
     [ObservableProperty] private string logs = "";
     public bool CanChangeConnection => !Connected && !Busy && !portsPending;
+    internal static string ShortText(string text, int limit = 76) => text.Length <= limit ? text : text[..limit] + "…";
+    public string ProtectionFirstCause
+    {
+        get
+        {
+            if (motorProtectionSummary.Length > 0) return motorProtectionSummary;
+            if (firstUiProtection is { } first)
+            {
+                if (first.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String)
+                    return ShortText(reason.GetString() ?? "首因未知");
+                if (first.TryGetProperty("fault", out var fault) && fault.ValueKind == JsonValueKind.String)
+                    return ShortText("后端首报：" + fault.GetString());
+            }
+            return "首因未知；尚无本会话保护证据";
+        }
+    }
+    internal string CurrentAxisFeedback(AxisState axis)
+    {
+        if (!StateFreshNow || CurrentState?.SessionId != session || !axis.Connected || !axis.Valid ||
+            !ReferenceEquals(axis, CurrentState.Axes.FirstOrDefault(a => a.Node == axis.Node)))
+            return $"ID{axis.Node} 当前反馈未知；停机未确认";
+        if (axis.Phase is "停止待确认" or "停机未确认") return $"ID{axis.Node} 本次停机未确认";
+        return axis.Gate == false ? $"ID{axis.Node} 门极关闭 · 无保持力矩；不代表机械静止" :
+            axis.Gate == true ? $"ID{axis.Node} 门极开启 · {(axis.Holding ? "减速保持" : "输出开启")}；不代表机械静止" :
+            $"ID{axis.Node} 门极未知；停机未确认";
+    }
+    public string ProtectionCurrentFeedback => string.Join("\n", Axes.Select(a => CurrentAxisFeedback(a.State)));
+    public string ProtectionNextStep => !StateFreshNow || CurrentState?.Axes.Any(a => a.Phase is "停止待确认" or "停机未确认" || a.Connected && !a.Valid) == true
+        ? "先核验硬件急停、机械支撑与实际停止；反馈未知时用顶部断开／取消→连接电机只读重连，不自动运动。"
+        : CanRestoreConnection ? "检查首因后恢复连接（不启动）；合格急停须人工处理，再显式启动。" :
+        "先停止并核验新门极反馈；点击本轴异常查看恢复条件，不自动启动或恢复旧目标。";
+    [ObservableProperty] private bool protectionDetailsExpanded;
+    partial void OnProtectionDetailsExpandedChanged(bool value) { if (value) OnPropertyChanged(nameof(ProtectionDetails)); }
+    public string ProtectionDetails => JsonSerializer.Serialize(new
+    {
+        firstUiProtection, firstLeaseFailure, firstPositionStartFailure, firstStreamSampleFailure,
+        visionChannel = new { vision.DesiredConnected, vision.Connected, vision.ChannelInterruption, vision.FirstChannelBreak },
+        originalReason = motorProtectionReason, requestResult = motorStopResult,
+        currentFeedback = ProtectionCurrentFeedback,
+        historicalFirstRequestTimeout = bridge.FirstTimeout,
+        recentTransport = SessionTransport(), recentUiTicks = uiLeaseHistory.ToArray()
+    }, new JsonSerializerOptions(Protocol.Json) { WriteIndented = true });
+    private BridgeTransportEvent[] SessionTransport() => bridge.RecentTransport.Where(e => e.SessionId == session).ToArray();
+    private string ProtectionMessage => "异常锁存：" + ProtectionFirstCause + "；停机状态须核验，见当前反馈／诊断详情";
     public bool StateFreshNow => bridge.Running && CurrentState?.Mode == "hardware" && Protocol.IsFresh(CurrentState, DateTimeOffset.UtcNow);
     public bool RecoveryPending => CurrentState?.EstopRecovery.Pending == true || recoveryRevision >= 0 && (CurrentState?.Revision ?? -1) < recoveryRevision;
     public bool CanAuthorize => StateFreshNow && Connected && authorizationValid && CurrentState?.Fault.Length == 0 && !RecoveryPending && !UnownedStopPending;
@@ -179,6 +223,11 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(CanChangeConnection));
         OnPropertyChanged(nameof(CanAuthorize));
         OnPropertyChanged(nameof(RecoveryPending));
+        OnPropertyChanged(nameof(ProtectionFirstCause)); OnPropertyChanged(nameof(ProtectionCurrentFeedback));
+        OnPropertyChanged(nameof(ProtectionNextStep));
+        // 完整时序仅在展开诊断时刷新，避免每 50ms 序列化长段文本。
+        if (ProtectionDetailsExpanded && Environment.TickCount64 >= nextProtectionDetailsAt)
+        { nextProtectionDetailsAt = Environment.TickCount64 + 200; OnPropertyChanged(nameof(ProtectionDetails)); }
         OnPropertyChanged(nameof(ConnectionSummary));
         OnPropertyChanged(nameof(PortStatus));
         OnPropertyChanged(nameof(SelectedNodeConnected));
@@ -249,6 +298,8 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         if (state.Revision >= recoveryRevision) recoveryRevision = -1;
         if (state.Revision >= unownedStopRevision) unownedStopRevision = -1;
         ObserveMotorSafety(state);
+        // 瞬断后已收到新预览，也须在本次续约之前撤销旧视觉流。
+        HandleVisionInterruption();
         // 先续约，再处理曲线、日志、参数表及界面通知；续约仍只来自活着的 UI。
         var leaseDecision = disposed ? "窗口已关闭" : !StateFreshNow ? "UI 快照过期" : !Connected ? "未连接" :
             !authorizationValid ? "授权已撤销" : state.Fault.Length > 0 ? "故障锁存" :
@@ -289,6 +340,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                 state.Fault,
                 backendProtection = state.FirstProtection,
                 recentUiTicks = uiLeaseHistory.ToArray(),
+                recentTransport = SessionTransport(),
                 note = "UI 观测时序；不将历史最大耗时认定为故障瞬间根因"
             }, Protocol.Json);
         Timing = $"周期 {state.PeriodMs:0.0}ms  /  UI 租约 50ms  /  revision {state.Revision}";
@@ -304,14 +356,13 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
             lastUnownedStopNotice = stopNotice;
             Message = $"ID{stopped.Node} 人工停止：{stopped.Reason}";
         }
-        if (state.Fault.Length > 0) Message = "故障锁存：" + state.Fault;
+        if (state.Fault.Length > 0) Message = "故障锁存：" + ShortText(state.Fault);
         if (!Fresh && !Busy) Message = state.Mode != "hardware" ? "桥接协议不兼容：仅支持真机；请重启最新版上位机。运动授权已禁用。" : StaleBridgeMessage;
         if (Fresh && Message == StaleBridgeMessage)
             Message = !authorizationValid ? "桥接状态已恢复，但会话授权仍失效；请停止、断开并重新确认连接。" :
                 Connected ? "桥接状态已恢复；运动须按本轴就绪提示显式操作。" : "桥接状态已恢复；当前未连接电机。";
         if (motorProtectionReason.Length > 0) Message =
-            (Fresh && motorProtectionReason == "受控会话失联或 UI 反馈过期" ? "桥接状态已恢复，但会话授权仍失效；" : "") +
-            "异常锁存：" + motorProtectionReason + "；" + MotorStopResult;
+            (Fresh && motorProtectionReason == "受控会话失联或 UI 反馈过期" ? "桥接状态已恢复，但会话授权仍失效；" : "") + ProtectionMessage;
         for (var i = 0; i < Math.Min(3, state.Axes.Length); i++) Axes[i].Update(state.Axes[i], Fresh, refreshCommands: false);
         axisSession = session;
         ControlTick();
@@ -362,6 +413,8 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
     /// <returns>A task that represents the asynchronous lease operation.</returns>
     private async Task LeaseAsync(BridgeState state)
     {
+        // 开流/目标应答的 UI 续约交接同样不能越过连接中断屏障。
+        HandleVisionInterruption();
         var revision = UiLeaseRevision(state);
         if (disposed || !StateFreshNow || !Protocol.IsFresh(state, DateTimeOffset.UtcNow) || !Connected || !authorizationValid || state.Fault.Length > 0 ||
             state.SessionId != session || revision is null || pendingLease is not null ||
@@ -412,13 +465,18 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                 maxUiTickDurationMs,
                 sinceUiTickMs = lastUiTickStamp == 0 ? (double?)null : Stopwatch.GetElapsedTime(lastUiTickStamp).TotalMilliseconds,
                 error = ex.Message,
-                firstRequestTimeout = bridge.FirstTimeout
+                currentRequestTimeout = (ex as BridgeTimeoutException)?.Diagnostic,
+                historicalFirstRequestTimeout = bridge.FirstTimeout,
+                recentTransport = SessionTransport()
             }, Protocol.Json);
-            Message = "续约失败：" + ex.Message;
+            Message = "续约失败：" + ShortText(ex.Message);
             if (ex is TimeoutException or IOException)
             {
+                if (HasMotorExposure) _ = ForceMotorStopAsync("UI 续约通信异常：" + ex.Message,
+                    ex is BridgeTimeoutException timeout ? $"UI 续约超时 · {timeout.Diagnostic.Stage}（{timeout.Diagnostic.LimitMs}ms）" :
+                    "UI 续约通信异常；详细首因见诊断");
+                // 有运动暴露时由同步进入的停机流程先冻结首因，再撤权；无暴露仍结束授权。
                 authorizationValid = false;
-                if (HasMotorExposure) _ = ForceMotorStopAsync("UI 续约通信异常：" + ex.Message);
             }
             RefreshCommands();
         }
@@ -457,7 +515,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         nextCurveAt = 0;
         recoveryRevision = -1;
         lastRecoveryNotice = "";
-        motorProtectionReason = motorStopResult = "";
+        motorProtectionReason = motorProtectionSummary = motorStopResult = "";
         motorProtectionNodes.Clear();
     }
 
@@ -485,6 +543,12 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         return $"ID{axis.Node} {previous}{feedback}" +
             (axis.StopTxError.Length > 0 ? "；本次停止发送失败：" + axis.StopTxError : "");
     }
+    private bool IsClosedUnownedObserver(AxisState axis, bool fresh) =>
+        fresh && axis.Connected && axis.Valid && !axis.Enabled && axis.Gate == false &&
+        axis.Phase is not ("停止待确认" or "停机未确认") && axis.Node != StartingPositionNode &&
+        !streamNodes.Contains(axis.Node) &&
+        !(axisSession == session && Axes.Any(a => a.Node == axis.Node && a.State.Enabled));
+
     private void ObserveMotorSafety(BridgeState? state)
     {
         // 必须先撤权和取消旧目标，再允许本 tick 的续约或位置发送。
@@ -495,17 +559,46 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
             !state.Connected ? "受控会话已断开，停机须核验" :
             state.Fault.Length > 0 ? "本地保护：" + state.Fault :
             !authorizationValid ? "会话运动授权已失效" :
-            state.Axes.Select(a => AxisViewModel.MotorSafetyIssue(a, Fresh)).FirstOrDefault(r => r.Length > 0) ?? "";
+            // 只读观察轴的残留故障不升级受控组停机；本轴异常显示及启动阻断仍保留。
+            // 必须有新鲜门极关闭证据；当前/此前受控、流成员及启动中轴不可排除。
+            state.Axes.Select(a => IsClosedUnownedObserver(a, Fresh) ? "" : AxisViewModel.MotorSafetyIssue(a, Fresh))
+                .FirstOrDefault(r => r.Length > 0) ?? "";
         if (reason.Length == 0 && axisSession == session && Axes.Any(a => a.State.Enabled &&
             state?.Axes.Any(s => s.Node == a.Node && s.Connected) != true))
             reason = "此前受控轴失联，禁止继续发送";
         if (reason.Length > 0) _ = ForceMotorStopAsync(reason);
     }
-    private async Task ForceMotorStopAsync(string reason)
+    private async Task ForceMotorStopAsync(string reason, string? summary = null)
     {
         // 每会话自动提交一次；人工停止仍可重试，不自动清故障或恢复。
         if (disposed || session.Length == 0 || motorProtectionReason.Length > 0) return;
+        // 在撤权、清流及发送急停之前冻结 UI 首因，避免随后 Fault=0x4 覆盖原触发证据。
+        var evidence = bridge.Latest?.SessionId == session ? bridge.Latest : CurrentState;
+        firstUiProtection ??= JsonSerializer.SerializeToElement(new
+        {
+            observedAt = DateTimeOffset.UtcNow,
+            sessionId = session,
+            revision = evidence?.Revision,
+            reason,
+            fault = evidence?.Fault,
+            backendProtection = evidence?.FirstProtection,
+            source = streamSource,
+            generation = streamGeneration,
+            streamNodes,
+            startingPositionNode = StartingPositionNode,
+            authorizationValidBeforeStop = authorizationValid,
+            axes = evidence?.Axes.Select(a => new
+            {
+                a.Node, a.Connected, a.Valid, a.Enabled, a.Gate, a.Phase,
+                a.Fault, a.Error, a.HeartbeatFaultFlags, a.AgeMs, a.FaultAgeMs, a.ErrorAgeMs,
+                excludedIdleUnowned = IsClosedUnownedObserver(a, Protocol.IsFresh(evidence, DateTimeOffset.UtcNow))
+            }).ToArray(),
+            recentUiTicks = uiLeaseHistory.ToArray(),
+            recentTransport = SessionTransport(),
+            note = "自动安全停机提交前的本会话证据；后续急停反馈不覆盖首因，不证明现场原始CAN时序"
+        }, Protocol.Json);
         motorProtectionReason = reason;
+        motorProtectionSummary = summary ?? ProtectionFirstCause;
         foreach (var axis in Axes.Where(a => axisSession == session && (a.State.Connected || a.State.Enabled) || a.Node == StartingPositionNode))
             motorProtectionNodes.Add(axis.Node);
         foreach (var axis in CurrentState?.Axes.Where(a => a.Connected || a.Enabled) ?? [])
@@ -525,7 +618,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         var requestedSession = session;
         var revision = ++intentRevision;
         motorStopResult = "强制停止请求已提交；等待新门极反馈，尚未确认停机";
-        Message = reason + "；" + motorStopResult;
+        Message = ProtectionMessage;
         try
         {
             await bridge.SendAsync("safety_stop", requestedSession, revision, new { reason = reason[..Math.Min(reason.Length, 512)] }, timeoutMs: 300);
@@ -538,7 +631,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
             motorStopResult = "强制停止未完成：" + ex.Message + "；停机未确认，检查硬件急停与机械支撑";
         }
         if (requestedSession != session) return;
-        Message = motorProtectionReason + "；" + MotorStopResult;
+        Message = ProtectionMessage;
         RefreshCommands();
     }
 
@@ -708,8 +801,9 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
             if (action == "hold") holdFeedbackRevisions.Clear();
             if (ex is TimeoutException or IOException)
             {
+                var stopping = ForceMotorStopAsync("操作通信异常：" + ex.Message);
                 authorizationValid = false;
-                await ForceMotorStopAsync("操作通信异常：" + ex.Message);
+                await stopping;
             }
             // 拒绝后以已确认状态为准；不重试使能或运动。
             if (motorProtectionReason.Length == 0 && requestedSession == session && bridge.Latest is { } s && s.SessionId == session)
@@ -883,6 +977,11 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                 revision = state?.Revision,
                 sessionFault = state?.Fault,
                 firstProtection = state?.FirstProtection,
+                protectionFirstCause = ProtectionFirstCause,
+                protectionCurrentFeedback = ProtectionCurrentFeedback,
+                protectionNextStep = ProtectionNextStep,
+                health = new { visionCaptureAgeMs = VisionCaptureAgeMs, desktopSnapshotAgeMs = DesktopSnapshotAgeMs,
+                    backendAcceptedLeaseAgeMs = BackendAcceptedLeaseAgeMs, controlFlow = CurrentControlFlowState },
                 confirmed = Confirmed,
                 benchMode = "fixed_unloaded",
                 confirmationSource = "用户已确认固定空载台架；非自动设备验证",
@@ -956,8 +1055,10 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                     uiTickDurationMs,
                     maxUiTickDurationMs,
                     firstRequestTimeout = bridge.FirstTimeout,
+                    recentTransport = SessionTransport(),
                     firstLeaseFailure,
                     firstUiProtection,
+                    visionChannel = new { vision.DesiredConnected, vision.Connected, vision.ChannelInterruption, vision.FirstChannelBreak },
                     leaseSubmitted,
                     leaseCompleted,
                     recentUiTicks = uiLeaseHistory.ToArray(),

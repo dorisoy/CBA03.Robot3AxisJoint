@@ -183,7 +183,7 @@ public partial class AxisViewModel : ObservableObject
     public string VisionStartHint => State.Holding ? $"ID{Node} 停止转动并保持力矩；" +
         (CanStartPosition ? "点击本轴“继续”恢复新控制，不执行旧目标" : StartPositionBlockReason) : owner.StartingPositionNode == Node ? $"ID{Node} 启动中：{owner.PositionStartStatus}" :
         State.Enabled && owner.StateFreshNow && State.Valid && !IsAbnormal ? $"ID{Node} 运行中；视觉暂缺保持，稳定新帧自动继续，启动不重复提交" :
-        $"ID{Node}：" + (CanStartPosition ? $"已就绪 · 点击本轴“启动”跟随 J{Node}" : "启动受阻：" + StartPositionBlockReason);
+        $"ID{Node}：" + (CanStartPosition ? $"已就绪 · 点击本轴“启动”跟随 J{Node}" : "启动受阻：" + MainViewModel.ShortText(StartPositionBlockReason, 48));
     public string PositionControlHint => State.Holding ? State.HoldState + "；点击“继续”恢复新控制，不重发START、不执行旧目标" : owner.StartingPositionNode == Node ? owner.PositionStartStatus :
         State.Enabled ? (owner.IsVision ? $"AI视觉控制 J{Node}→ID{Node}；按捕获基准下发相对转角，日常停止转动后仍有保持力矩" :
             CanExecute ? SliderControlHint + "；日常停止仅减速保持" : ExecuteBlockReason) :
@@ -273,11 +273,13 @@ public partial class AxisViewModel : ObservableObject
         MotorSafetyIssue(State, owner.StateFreshNow);
     public bool IsAbnormal => AbnormalReason.Length > 0;
     public string StopButtonText => IsAbnormal ? "异常" : "停止";
-    public string StopMotorHint => IsAbnormal ? AbnormalReason + "；点击异常请求解锁，无需再次确认，不自动启动或恢复旧目标。" +
-        (EstopClearBlockReason.Length > 0 ? "受阻：" + EstopClearBlockReason : "将核验新反馈并恢复符合条件的锁存。") +
-        owner.MotorStopResult + "；" + EstopRecoveryText +
-        (!owner.StateFreshNow || !State.Connected || !State.Valid ? "；" + owner.ConnectionRecoveryHint : "") +
-        (!State.Enabled && State.Gate == true ? "；本轴未接管，须先在下方专用人工确认后停止；异常解锁不会接管电机。" : "") : !State.Connected ?
+    public string StopMotorHint => IsAbnormal ? MainViewModel.ShortText(AbnormalReason) + "\n" +
+        owner.CurrentAxisFeedback(State) + "\n" +
+        (!owner.StateFreshNow || !State.Connected || !State.Valid ?
+            "先核验硬件急停与支撑；顶部断开／取消→连接电机只读重连，不自动运动。" :
+            !State.Enabled && State.Gate == true ? "本轴未接管，须先专用人工确认停止；不自动接管。" :
+            EstopClearBlockReason.Length > 0 ? "恢复受阻：" + MainViewModel.ShortText(EstopClearBlockReason) :
+            "点击异常核验并恢复合格锁存；不自动启动或恢复旧目标。") + "\n完整首因与请求结果见诊断详情。" : !State.Connected ?
         "本轴未连接；未知停机状态须检查硬件急停与支撑。" + (owner.Connected ? owner.ConnectionRecoveryHint : "") :
         !owner.StateFreshNow || !State.Valid ? "当前反馈未知，不能确认保持；真实失联仍走安全保护" :
         !State.Enabled && State.Gate == true ? "本轴未接管；日常停止转动不接管外部电机，须在专用人工入口核对" :

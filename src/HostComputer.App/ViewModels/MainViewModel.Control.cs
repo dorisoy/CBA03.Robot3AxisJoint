@@ -1,4 +1,5 @@
 using Avalonia.Threading;
+using Avalonia.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using HostComputer.Core;
@@ -142,12 +143,16 @@ public partial class MainViewModel
         var globalEpoch = globalCancellationEpoch;
         var visionStart = IsVision;
         var sample = visionStart ? vision.Latest?.Current : null;
+        var channel = vision.ChannelInterruption;
         Busy = true; structuralNode = axis.Node;
         try
         {
             var revision = ++intentRevision;
             var reply = await bridge.SendAsync("resume_axis", requestedSession, revision,
                 new { nodes = new[] { axis.Node }, source = visionStart ? "vision" : "manual", sample });
+            HandleVisionInterruption();
+            if (visionStart && channel != vision.ChannelInterruption)
+                throw new IOException("视觉恢复期间连接或来源代次中断；旧恢复已取消");
             if (disposed || requestedSession != session || globalEpoch != globalCancellationEpoch || epoch != AxisEpoch(axis.Node)) return;
             AcceptHoldReply(reply, revision);
             var started = Stopwatch.GetTimestamp();
@@ -155,6 +160,8 @@ public partial class MainViewModel
             while (Stopwatch.GetElapsedTime(started).TotalSeconds < 3)
             {
                 if (disposed || requestedSession != session || globalEpoch != globalCancellationEpoch || epoch != AxisEpoch(axis.Node)) return;
+                if (visionStart && (channel != vision.ChannelInterruption || vision.Latest?.Current.Identity != sample?.Identity))
+                    throw new IOException("视觉恢复期间连接或来源变化");
                 if (ControlSourceIndex != source || !CanAuthorize) throw new InvalidOperationException("恢复来源或授权变化");
                 if (StateFreshNow && CurrentState?.Revision == intentRevision &&
                     ReferenceEquals(axis.State, CurrentState.Axes.FirstOrDefault(a => a.Node == axis.Node)) &&
@@ -240,7 +247,7 @@ public partial class MainViewModel
             RefreshCommands();
         }
     }
-    private long positionStartEpoch, globalCancellationEpoch, observedVisionInterruption;
+    private long positionStartEpoch, globalCancellationEpoch, observedVisionInterruption, observedVisionChannelInterruption;
     private JsonElement? firstPositionStartFailure;
     private long unownedStopRevision = -1;
     private string lastUnownedStopNotice = "";
@@ -279,6 +286,7 @@ public partial class MainViewModel
         var visionStart = IsVision;
         var visionIdentity = visionStart ? vision.Latest!.Current.Identity : "";
         var visionInterruption = vision.SourceInterruption;
+        var visionChannelInterruption = vision.ChannelInterruption;
         var epoch = ++positionStartEpoch;
         var axisEpoch = AxisEpoch(axis.Node);
         var failureStage = "初始化";
@@ -291,9 +299,9 @@ public partial class MainViewModel
                 throw new OperationCanceledException("位置环启动已取消");
             if (ControlSourceIndex != requestedSource || !IsPositionSource || !authorizationValid || !Connected || CurrentState?.Fault.Length > 0)
                 throw new InvalidOperationException("控制来源、会话授权或本地保护发生变化，启动中止");
-            if (visionStart && (vision.SourceInterruption != visionInterruption ||
+            if (visionStart && (vision.SourceInterruption != visionInterruption || vision.ChannelInterruption != visionChannelInterruption ||
                 VisionStartBlockReason.Length > 0 || vision.Latest?.Current.Identity != visionIdentity))
-                throw new InvalidOperationException("视觉采集、配对或校准已变化，启动中止");
+                throw new InvalidOperationException("视觉采集、订阅或校准已变化，启动中止");
         }
         async Task WaitForState(Func<AxisState, bool> ready, string stage)
         {
@@ -588,9 +596,45 @@ public partial class MainViewModel
     [ObservableProperty] private int controlSourceIndex;
     [ObservableProperty] private bool realTimeControl;
     [ObservableProperty] private string visionStatus = "视觉通道未连接；连接通道不会打开相机或使能电机";
-    [ObservableProperty, NotifyPropertyChangedFor(nameof(HasVisionPairCode))] private string pairCode = "";
-    public bool HasVisionPairCode => PairCode.Length > 0;
-    [ObservableProperty] private string mappingPreview = "等待网页配对、校准及新鲜关节角";
+    public string VisionSubscriptionStatus => vision.Connected ? "已订阅" : vision.DesiredConnected ? "重连中" : "未连接";
+    public double? VisionCaptureAgeMs => vision.Connected && vision.Latest?.Current is { } sample &&
+        double.IsFinite(sample.AgeMs) && sample.AgeMs >= 0 ? sample.AgeMs : null;
+    public double? DesktopSnapshotAgeMs
+    {
+        get
+        {
+            if (!bridge.Running || CurrentState is not { Version: 1, Mode: "hardware" } state ||
+                !double.IsFinite(state.Time) || state.Time <= 0) return null;
+            var age = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - state.Time * 1000;
+            // 与既有快照判据保持一致：超过50ms的未来时间无效，不能钳成零后显示绿色。
+            return age >= -50 ? Math.Max(0, age) : null;
+        }
+    }
+    public double? BackendAcceptedLeaseAgeMs => StateFreshNow && CurrentState is { Connected: true, LeaseCount: > 0, LeaseAgeMs: { } age } &&
+        double.IsFinite(age) && age >= 0 ? age + (DesktopSnapshotAgeMs ?? 0) : null;
+    private static readonly IBrush HealthUnknown = Brush.Parse("#8091A7"), HealthFresh = Brush.Parse("#70E4B5"), HealthWarning = Brush.Parse("#F3BD69");
+    private static bool HealthWithinLimit(double age, double limit) => limit == 300 ? age <= limit : age < limit;
+    private static string HealthAgeText(double? age, double limit) => age is { } value ?
+        $"{value:0}ms / {limit:0}ms · {(HealthWithinLimit(value, limit) ? "新鲜" : "过期")}" : $"未知 / {limit:0}ms";
+    private static IBrush HealthAgeBrush(double? age, double limit) => age is null ? HealthUnknown : HealthWithinLimit(age.Value, limit) ? HealthFresh : HealthWarning;
+    public string VisionCaptureHealth => "原始采集 " + HealthAgeText(VisionCaptureAgeMs, 300);
+    public string DesktopSnapshotHealth => "桌面快照 " + HealthAgeText(DesktopSnapshotAgeMs, 150);
+    public string BackendLeaseHealth => "已接受 lease " + HealthAgeText(BackendAcceptedLeaseAgeMs, 200);
+    public IBrush VisionCaptureHealthBrush => HealthAgeBrush(VisionCaptureAgeMs, 300);
+    public IBrush DesktopSnapshotHealthBrush => HealthAgeBrush(DesktopSnapshotAgeMs, 150);
+    public IBrush BackendLeaseHealthBrush => HealthAgeBrush(BackendAcceptedLeaseAgeMs, 200);
+    public string CurrentControlFlowState => !StateFreshNow || CurrentState?.Connected != true ? "未知" :
+        motorProtectionReason.Length > 0 || !authorizationValid || CurrentState.Fault.Length > 0 ? "故障" :
+        CurrentState.Axes.Any(a => a.Connected && !a.Valid) || CurrentState.Active && BackendAcceptedLeaseAgeMs is not (< 200) ? "未知" :
+        CurrentState.Stream.State is "采集等待保持" or "失锁保持" ? CurrentState.Stream.State :
+        CurrentState.Axes.Any(a => a.Connected && a.Enabled && a.Holding) ?
+            CurrentState.Stream.State == "跟随" ? "正在跟随 · 部分轴日常保持" : "日常保持" :
+        CurrentState.Stream.State == "跟随" ? "正在跟随" :
+        CurrentState.Stream.State == "未开启" ? "仅预览／未开流" : "未知";
+    public string ControlFlowHealth => "控制流 " + CurrentControlFlowState;
+    public IBrush ControlFlowHealthBrush => CurrentControlFlowState == "未知" || CurrentControlFlowState == "仅预览／未开流" ? HealthUnknown :
+        CurrentControlFlowState == "正在跟随" ? HealthFresh : HealthWarning;
+    [ObservableProperty] private string mappingPreview = "等待网页采集、校准及新鲜关节角";
     [ObservableProperty] private string controlStatus = "手动位置控制 · 启动前滑条仅修改待下发值";
     public bool IsManual => ControlSourceIndex == 0;
     public bool IsVision => ControlSourceIndex == 3;
@@ -598,25 +642,26 @@ public partial class MainViewModel
     internal string VisionStartBlockReason => GetVisionStartBlockReason(vision.Latest?.Current);
     private string GetVisionStartBlockReason(VisionSample? sample)
     {
-        if (vision.Error.Length > 0)
-            return "视觉来源异常：" + vision.Error + "；请断开视觉通道后重新连接、配对";
         if (!vision.Connected)
-            return "请先点击顶部“连接视觉通道”；连接不会打开相机或使能电机";
+            return vision.DesiredConnected ? "视觉通道重连中；仅恢复订阅预览，不自动启动" :
+                "请先点击顶部“连接视觉通道”；连接不会打开相机或使能电机";
+        if (vision.ChannelInterruption != observedVisionChannelInterruption)
+            return "视觉连接或来源代次中断待消费；旧控制授权失效";
+        if (vision.Error.Length > 0)
+            return "视觉来源不可用：" + vision.Error + "；订阅保留，请在网页重新建立合法采集来源";
         if (vision.SourceInterruption != observedVisionInterruption)
             return "视觉采集状态待消费；保持等待新帧，同来源稳定后自动继续";
         if (vision.SuspensionReason.Length > 0)
-            return vision.SuspensionReason + "；等待新采集，无需重新配对";
+            return vision.SuspensionReason + "；等待同源新采集，订阅保留";
         // 仅细化已有禁用原因；不改变有效样本判据或300ms原始采集保护。
         if (sample is { IsSafe: true, Valid: true }) return "";
-        if (vision.PairCode.Length > 0)
-            return "等待网页配对：在已校准并开始跟随的网页输入顶部4位数字码（5分钟有效）";
         if (sample is null)
-            return "尚未收到新鲜 J角；请在网页校准、开始跟随并配对。配对码未显示或已过期时请断开后重连";
+            return "已订阅，等待采集：尚未收到新鲜 J角；请在网页人工连接相机、校准并开始跟随，无需配对码";
         if (sample.AgeMs > 300)
             return $"原始采集已过期（{sample.AgeMs:0}ms，超过300ms）；请检查网页采集与跟随是否持续更新";
         if (!sample.Valid || sample.FaceCount != 1 || sample.Status != "tracking")
             return "未获得有效单人追踪；请检查相机画面、网页校准和跟随状态，等待新鲜 J角";
-        return "J角身份、校准或数据格式无效；请检查网页状态并重新连接、配对";
+        return "J角身份、校准或数据格式无效；请检查网页状态并建立新来源";
     }
     public bool StreamRunning => streamGeneration.Length > 0 || streamOpening;
     public bool CanSelectSource => !Busy && !StreamRunning && Axes.All(a => !a.State.Enabled ||
@@ -656,7 +701,8 @@ public partial class MainViewModel
         RealTimeControl ? "实时已开启：目标变化即提交；在途只保留最新值，松开后保持仍有力矩" :
         "实时已就绪：勾选后拖动滑条即可自动下发；勾选本身不发送目标";
     private bool VisionAligned => vision.Connected && vision.Error.Length == 0 &&
-        vision.SourceInterruption == observedVisionInterruption && alignedIdentity.Length > 0 &&
+                vision.SourceInterruption == observedVisionInterruption &&
+                vision.ChannelInterruption == observedVisionChannelInterruption && alignedIdentity.Length > 0 &&
         vision.Latest?.Current is { IsSafe: true, Valid: true } sample && sample.Identity == alignedIdentity &&
         alignedNodes.Length > 0 && alignedNodes.All(n => Axes[n - 1] is { VisionSelected: true, MappingConfirmed: true } axis && axis.State.Connected);
     public bool CanEnableForSource(AxisViewModel axis) => IsManual || IsVision && VisionAligned && axis.VisionSelected && alignedNodes.Contains(axis.Node);
@@ -678,15 +724,15 @@ public partial class MainViewModel
         {
             try { await vision.ConnectAsync(); }
             catch (Exception ex) { VisionStatus = ex.Message; }
-        }, () => !vision.Connected && !StreamRunning);
+        }, () => !vision.DesiredConnected && !StreamRunning);
         DisconnectVisionCommand = new AsyncRelayCommand(async () =>
         {
-            if (streamSource == "vision") await IntentAsync("stop", null, true);
-            ClearAlignment();
             await vision.DisconnectAsync();
-        }, () => vision.Connected);
+            HandleVisionInterruption();
+            ClearAlignment();
+        }, () => vision.DesiredConnected);
         AlignVisionCommand = new AsyncRelayCommand(AlignVisionAsync, () => IsVision && !Active && !Busy && CanAuthorize &&
-            vision.Connected && vision.Error.Length == 0 && vision.SourceInterruption == observedVisionInterruption &&
+            vision.Connected && vision.Error.Length == 0 && vision.SourceInterruption == observedVisionInterruption && vision.ChannelInterruption == observedVisionChannelInterruption &&
             vision.Latest?.Current is { IsSafe: true, Valid: true } && SelectedVisionAxes().Length > 0 &&
             SelectedVisionAxes().All(a => a.CanReference && a.MappingConfirmed));
         FollowVisionCommand = new AsyncRelayCommand(() => BeginStreamAsync("vision", SelectedVisionAxes()), () =>
@@ -761,6 +807,7 @@ public partial class MainViewModel
         Busy = true;
         var epoch = controlEpoch;
         var visionInterruption = vision.SourceInterruption;
+        var visionChannelInterruption = vision.ChannelInterruption;
         try
         {
             var nodes = axes.Select(a => a.Node).ToArray();
@@ -776,7 +823,7 @@ public partial class MainViewModel
                     reference = a.ReferenceConfirmed
                 })
             });
-            if (epoch != controlEpoch || visionInterruption != vision.SourceInterruption ||
+            if (epoch != controlEpoch || visionInterruption != vision.SourceInterruption || visionChannelInterruption != vision.ChannelInterruption ||
                 vision.Latest?.Current.Identity != sample.Identity) return;
             alignedIdentity = sample.Identity; alignedNodes = nodes; alignedReferences = sample.Angles.ToArray();
             Message = "已捕获两端参考姿态；不会移动电机。逐轴使能后显式开始实机跟随。";
@@ -808,6 +855,8 @@ public partial class MainViewModel
             var result = await bridge.SendAsync(attaching ? "stream_attach" : "stream_begin", session, streamRevision,
                 new { nodes, source, sample, generation = attaching ? streamGeneration : null });
             if (disposed || epoch != controlEpoch || requestedSession != session || nodes.Any(n => operationEpochs[n] != AxisEpoch(n))) return;
+            HandleVisionInterruption();
+            if (epoch != controlEpoch) return;
             if (source == "vision" && (!vision.Connected || vision.Error.Length > 0 ||
                 vision.Latest?.Current is { } current && current.Identity != alignedIdentity))
                 throw new IOException("视觉通道断开或身份变化；禁止沿用本次控制流");
@@ -886,6 +935,26 @@ public partial class MainViewModel
 
     private void HandleVisionInterruption()
     {
+        var channel = vision.ChannelInterruption;
+        if (channel != observedVisionChannelInterruption)
+        {
+            observedVisionChannelInterruption = channel;
+            var controlling = streamSource == "vision" || IsVision && (StartingPositionNode != 0 || Busy && structuralNode != 0);
+            // 先撤销旧流和启动；同一 UI tick 随后看到新来源也不能漏保护。
+            if (controlling && HasMotorExposure)
+                _ = ForceMotorStopAsync(vision.FirstChannelBreak?.Reason ?? "视觉通道或来源代次中断；旧流撤权");
+            else
+            {
+                if (IsVision && StartingPositionNode != 0)
+                {
+                    ++positionStartEpoch; ++globalCancellationEpoch;
+                    StartingPositionNode = structuralNode = 0;
+                    preparingPosition = Busy = false;
+                }
+                if (streamSource == "vision") ClearLocalStream();
+                ClearAlignment();
+            }
+        }
         var interruption = vision.SourceInterruption;
         if (interruption == observedVisionInterruption) return;
         observedVisionInterruption = interruption;
@@ -898,11 +967,11 @@ public partial class MainViewModel
     private void ControlTick()
     {
         HandleVisionInterruption();
-        PairCode = vision.PairCode;
+        OnPropertyChanged(nameof(VisionSubscriptionStatus));
         var sample = vision.Latest?.Current;
         var visionBlock = GetVisionStartBlockReason(sample);
         VisionStatus = visionBlock.Length > 0 ? "视觉未就绪：" + visionBlock :
-            $"视觉已就绪 · 已配对 · {sample!.TargetKind} · 采集 {sample.CaptureSeq} / {sample.AgeMs:0}ms；仍须核验本轴启动条件";
+            $"视觉已就绪 · 已订阅 · 新鲜J角 · {sample!.TargetKind} · 采集 {sample.CaptureSeq} / {sample.AgeMs:0}ms；仍须核验本轴启动条件";
         var preview = vision.Connected && vision.Error.Length == 0 ? sample : null;
         foreach (var axis in Axes)
             axis.UpdateVision(preview, alignedReferences.Length == 3 ? alignedReferences[axis.Node - 1] : null,
@@ -1023,6 +1092,7 @@ public partial class MainViewModel
                     backendFirstProtection = bridge.Latest?.FirstProtection,
                     uiTickIntervalMs,
                     uiTickDurationMs,
+                    currentRequestTimeout = (ex as BridgeTimeoutException)?.Diagnostic,
                     firstRequestTimeout = bridge.FirstTimeout
                 }, Protocol.Json);
                 Message = "连续目标已停止：" + reason;
@@ -1045,6 +1115,10 @@ public partial class MainViewModel
         OnPropertyChanged(nameof(CanToggleRealTime)); OnPropertyChanged(nameof(RealTimeBlockReason)); OnPropertyChanged(nameof(RealTimeHint));
         OnPropertyChanged(nameof(NeedsConnectionRecovery)); OnPropertyChanged(nameof(CanRestoreConnection));
         OnPropertyChanged(nameof(ConnectionRecoveryHint)); RestoreConnectionCommand?.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(VisionCaptureHealth)); OnPropertyChanged(nameof(DesktopSnapshotHealth));
+        OnPropertyChanged(nameof(BackendLeaseHealth)); OnPropertyChanged(nameof(ControlFlowHealth));
+        OnPropertyChanged(nameof(VisionCaptureHealthBrush)); OnPropertyChanged(nameof(DesktopSnapshotHealthBrush));
+        OnPropertyChanged(nameof(BackendLeaseHealthBrush)); OnPropertyChanged(nameof(ControlFlowHealthBrush));
         ConnectVisionCommand?.NotifyCanExecuteChanged(); DisconnectVisionCommand?.NotifyCanExecuteChanged();
         AlignVisionCommand?.NotifyCanExecuteChanged(); FollowVisionCommand?.NotifyCanExecuteChanged();
     }

@@ -190,15 +190,16 @@
                     <TextBlock Text="AI视觉随动" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,14,4" />
                     <Button x:Name="ConnectVisionButton" Content="连接视觉通道" Command="{Binding ConnectVisionCommand}" Padding="10,5" Margin="0,0,8,4" ToolTip.Tip="连接本机视觉服务；不打开相机、不使能电机" />
                     <Button x:Name="DisconnectVisionButton" Content="断开视觉通道" Command="{Binding DisconnectVisionCommand}" Padding="10,5" Margin="0,0,12,4" />
-                    <Border x:Name="VisionPairCodePanel" IsVisible="{Binding HasVisionPairCode}" BorderBrush="#70E4B5" BorderThickness="1" CornerRadius="4" Padding="8,2" Margin="0,0,0,4">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBlock Text="网页配对码" VerticalAlignment="Center" FontSize="12" />
-                            <TextBlock x:Name="VisionPairCodeText" Text="{Binding PairCode}" FontSize="22" LetterSpacing="4" Foreground="#70E4B5" />
-                        </StackPanel>
-                    </Border>
+                    <TextBlock x:Name="VisionSubscriptionText" Text="{Binding VisionSubscriptionStatus}" VerticalAlignment="Center" Foreground="#70E4B5" Margin="0,0,8,4" ToolTip.Tip="无需配对码；订阅或自动重连仅恢复预览，不代表电机授权已恢复" />
                 </WrapPanel>
-                <TextBlock x:Name="VisionSetupSteps" Text="① 连接视觉通道 → ② 网页校准并开始跟随 → ③ 在网页输入配对码 → ④ 新鲜 J角到达后，点击本轴“启动”。配对只预览，不自动使能。" TextWrapping="Wrap" FontSize="11" Classes="muted" />
+                <TextBlock x:Name="VisionSetupSteps" Text="① 连接视觉通道，自动订阅 → ② 网页人工连接相机、校准并开始跟随 → ③ 新鲜 J角到达后点击本轴“启动”。无需配对码；重连仅恢复预览，不自动使能。" TextWrapping="Wrap" FontSize="11" Classes="muted" />
                 <TextBlock x:Name="VisionReadyStatus" Text="{Binding VisionStatus}" TextWrapping="Wrap" FontSize="12" Foreground="#70E4B5" />
+                <UniformGrid x:Name="VisionHealthIndicators" Columns="4" Margin="0,3">
+                    <TextBlock x:Name="VisionCaptureHealthText" Text="{Binding VisionCaptureHealth}" Foreground="{Binding VisionCaptureHealthBrush}" FontSize="11" TextWrapping="Wrap" />
+                    <TextBlock x:Name="DesktopSnapshotHealthText" Text="{Binding DesktopSnapshotHealth}" Foreground="{Binding DesktopSnapshotHealthBrush}" FontSize="11" TextWrapping="Wrap" />
+                    <TextBlock x:Name="BackendLeaseHealthText" Text="{Binding BackendLeaseHealth}" Foreground="{Binding BackendLeaseHealthBrush}" FontSize="11" TextWrapping="Wrap" />
+                    <TextBlock x:Name="ControlFlowHealthText" Text="{Binding ControlFlowHealth}" Foreground="{Binding ControlFlowHealthBrush}" FontSize="11" TextWrapping="Wrap" />
+                </UniformGrid>
                 <ItemsControl x:Name="VisionAxisStartReasons" ItemsSource="{Binding Axes}">
                     <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Columns="3" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
@@ -219,10 +220,21 @@
                 x:Name="SafetyBar"
                 Classes="panel"
                 Margin="0,0,0,8">
-            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                <TextBlock Text="{Binding ConnectionRecoveryHint}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="#F3BD69" />
-                <Button x:Name="RestoreConnectionButton" Grid.Column="1" Content="恢复连接（不启动）" Command="{Binding RestoreConnectionCommand}" />
-            </Grid>
+            <StackPanel Spacing="4">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                    <StackPanel Spacing="3">
+                        <TextBlock x:Name="ProtectionFirstCauseText" Text="{Binding ProtectionFirstCause}" FontSize="12" FontWeight="SemiBold" Foreground="#F3BD69" TextWrapping="Wrap" />
+                        <TextBlock x:Name="ProtectionCurrentFeedbackText" Text="{Binding ProtectionCurrentFeedback}" FontSize="11" TextWrapping="Wrap" />
+                        <TextBlock x:Name="ProtectionNextStepText" Text="{Binding ProtectionNextStep}" FontSize="11" TextWrapping="Wrap" Classes="muted" />
+                    </StackPanel>
+                    <Button x:Name="RestoreConnectionButton" Grid.Column="1" Content="恢复连接（不启动）" Command="{Binding RestoreConnectionCommand}" VerticalAlignment="Top" ToolTip.Tip="{Binding ConnectionRecoveryHint}" />
+                </Grid>
+                <Expander x:Name="ProtectionDiagnostics" Header="诊断详情 / 原始首因与传输时序" IsExpanded="{Binding ProtectionDetailsExpanded}" HorizontalAlignment="Stretch">
+                    <ScrollViewer MaxHeight="160">
+                        <TextBlock Text="{Binding ProtectionDetails}" FontSize="10" TextWrapping="Wrap" Classes="muted" />
+                    </ScrollViewer>
+                </Expander>
+            </StackPanel>
         </Border>
 
         <Grid Grid.Row="3" ColumnDefinitions="*,330" ColumnSpacing="10">
@@ -394,7 +406,7 @@
             </Border>
         </Grid>
         <Border Grid.Row="4" Background="#212B38" CornerRadius="6" Padding="10,6" Margin="0,8,0,0">
-            <TextBlock Text="{Binding Message}" TextWrapping="Wrap" Foreground="#F3BD69" />
+            <TextBlock x:Name="MessageSummary" Text="{Binding Message}" TextTrimming="CharacterEllipsis" Foreground="#F3BD69" />
         </Border>
     </Grid>
 </Window>

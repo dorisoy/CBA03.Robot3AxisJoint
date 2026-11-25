@@ -1,11 +1,15 @@
-param([ValidateSet('Build','Test','Publish','All')][string]$Task = 'Build')
+param(
+    [ValidateSet('Build','Test','Publish','All')][string]$Task = 'Build',
+    [string]$ArtifactsPath,
+    [string]$VerificationPath
+)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $solution = Join-Path $root 'HostComputer.slnx'
 $testProject = Join-Path $root 'tests\HostComputer.Tests\HostComputer.Tests.csproj'
 $python = Join-Path $root '.venv\Scripts\python.exe'
-$records = Join-Path $root 'artifacts\verification'
-$isolated = Join-Path $root 'artifacts\build'
+$records = if ($VerificationPath) { $VerificationPath } else { Join-Path $root 'artifacts\verification' }
+$isolated = if ($ArtifactsPath) { $ArtifactsPath } else { Join-Path $root 'artifacts\build' }
 $drive = [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($root))
 if ($drive.AvailableFreeSpace -lt 1GB) { throw '构建前至少需要 1 GiB 可用空间；请先释放空间，脚本不会自动删除文件。' }
 New-Item -ItemType Directory -Path $records -Force | Out-Null
@@ -20,7 +24,7 @@ if ($Task -in @('Build','All')) {
 }
 if ($Task -in @('Test','All')) {
     if (!(Test-Path $python)) { throw '缺少独立 .venv，请先运行 Prepare.ps1' }
-    & $python -X utf8 (Join-Path $root 'tests\python\run_tests.py')
+    & $python -X utf8 (Join-Path $root 'tests\python\run_tests.py') --results-directory $records
     Check-Exit 'Python tests'
     & dotnet test $testProject -c Release -r win-x64 -p:SelfContained=false --artifacts-path $isolated --nologo --logger 'trx;LogFileName=desktop.trx' --results-directory $records
     Check-Exit '.NET tests'

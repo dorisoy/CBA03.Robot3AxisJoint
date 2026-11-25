@@ -20,12 +20,14 @@ public sealed record VisionReceipt(VisionSample Sample, long ReceivedAt)
 
 
 /// <summary>
-/// 可视化后端的 WebSocket 客户端接口，提供配对码、最新视觉样本、连接状态和错误信息，并支持异步连接、断开和发布状态。
+/// 常驻视觉订阅；连接与来源代次中断独立于同源采集暂挂，不授予电机权限。
 /// </summary>
 public interface IVisionClient : IAsyncDisposable
 {
     bool Connected { get; }
-    string PairCode { get; }
+    bool DesiredConnected => Connected;
+    long ChannelInterruption => 0;
+    VisionChannelBreak? FirstChannelBreak => null;
     string Error { get; }
     VisionReceipt? Latest { get; }
     long SourceInterruption => 0;
@@ -39,18 +41,44 @@ public interface IVisionClient : IAsyncDisposable
 /// <summary>
 /// 接收线程只更新不可变最新快照；不持有 BridgeClient，也不续 UI 租约。
 /// </summary>
+public sealed record VisionChannelBreak(long Sequence, long ObservedAtMs, string Reason);
+
 public sealed class VisionClient : IVisionClient
 {
-    private ClientWebSocket? socket;
+    private WebSocket? socket;
     private CancellationTokenSource? cancellation;
     private Task? receiver;
+    private readonly SemaphoreSlim lifecycle = new(1, 1);
+    private readonly Func<CancellationToken, Task<WebSocket>> connector;
+    private readonly Func<int, CancellationToken, Task> delay;
     private volatile VisionReceipt? latest;
-    private volatile string pairCode = "", error = "", desktopSession = "", publisher = "";
-    private long codeExpires, sourceInterruption;
+    private volatile string error = "", desktopSession = "", publisher = "";
+    private long sourceInterruption, channelInterruption;
+    private volatile VisionChannelBreak? firstChannelBreak;
     private volatile string suspensionReason = "";
+    private volatile bool desiredConnected, subscribed, disposed;
     private int sending;
-    public bool Connected => socket?.State == WebSocketState.Open;
-    public string PairCode => Environment.TickCount64 < codeExpires ? pairCode : "";
+    public bool Connected => subscribed && socket?.State == WebSocketState.Open;
+    public bool DesiredConnected => desiredConnected;
+    public long ChannelInterruption => Interlocked.Read(ref channelInterruption);
+    public VisionChannelBreak? FirstChannelBreak => firstChannelBreak;
+
+    public VisionClient(Func<CancellationToken, Task<WebSocket>>? connector = null,
+        Func<int, CancellationToken, Task>? delay = null)
+    {
+        this.connector = connector ?? OpenSocketAsync;
+        this.delay = delay ?? ((ms, token) => Task.Delay(ms, token));
+    }
+    public static int RetryDelay(int attempt) => attempt >= 4 ? 5000 : 500 << Math.Max(0, attempt);
+    private static async Task<WebSocket> OpenSocketAsync(CancellationToken token)
+    {
+        var ws = new ClientWebSocket();
+        ws.Options.SetRequestHeader("Origin", "http://127.0.0.1:5189");
+        ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(10);
+        ws.Options.KeepAliveTimeout = TimeSpan.FromSeconds(20);
+        try { await ws.ConnectAsync(new Uri("ws://127.0.0.1:5189/ws/joints"), token).ConfigureAwait(false); return ws; }
+        catch { ws.Dispose(); throw; }
+    }
     public string Error => error;
     public VisionReceipt? Latest => latest;
     public long SourceInterruption => Interlocked.Read(ref sourceInterruption);
@@ -63,19 +91,63 @@ public sealed class VisionClient : IVisionClient
     /// <returns></returns>
     public async Task ConnectAsync()
     {
-        await DisconnectAsync().ConfigureAwait(false);
-        error = "";
-        cancellation = new CancellationTokenSource();
-        socket = new ClientWebSocket();
-        socket.Options.SetRequestHeader("Origin", "http://127.0.0.1:5189");
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation.Token);
-        timeout.CancelAfter(3000);
+        await lifecycle.WaitAsync().ConfigureAwait(false);
         try
         {
-            await socket.ConnectAsync(new Uri("ws://127.0.0.1:5189/ws/joints"), timeout.Token).ConfigureAwait(false);
-            receiver = ReceiveAsync(socket, cancellation.Token);
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (desiredConnected) return;
+            desiredConnected = true;
+            cancellation = new CancellationTokenSource();
+            var token = cancellation.Token;
+            receiver = Task.Run(() => ConnectionLoopAsync(token));
+            Changed?.Invoke();
         }
-        catch (Exception ex) { error = "视觉通道连接失败：" + ex.Message; socket.Abort(); throw; }
+        finally { lifecycle.Release(); }
+    }
+
+    private async Task ConnectionLoopAsync(CancellationToken token)
+    {
+        var attempt = 0;
+        while (!token.IsCancellationRequested)
+        {
+            WebSocket? ws = null;
+            using var handshake = CancellationTokenSource.CreateLinkedTokenSource(token);
+            handshake.CancelAfter(3000);
+            try
+            {
+                ws = await connector(handshake.Token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                socket = ws;
+                var hello = JsonSerializer.SerializeToUtf8Bytes(new { action = "subscription", schema = 2, protocol = 2, role = "desktop" });
+                await ws.SendAsync(hello.AsMemory(), WebSocketMessageType.Text, true, handshake.Token).ConfigureAwait(false);
+                await ReceiveAsync(ws, token, handshake, () => attempt = 0).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!token.IsCancellationRequested)
+            {
+                error = "视觉通道重连中：" + ex.Message;
+            }
+            finally
+            {
+                // 单一连接任务先收割旧接收循环，再建立下一代；迟到发送只能终止其自有旧 socket。
+                if (subscribed || publisher.Length > 0) BreakChannel(error.Length > 0 ? error : "视觉通道已断开");
+                subscribed = false; latest = null; desktopSession = publisher = suspensionReason = "";
+                if (ReferenceEquals(socket, ws)) socket = null;
+                ws?.Abort(); ws?.Dispose();
+                Changed?.Invoke();
+            }
+            if (token.IsCancellationRequested) break;
+            try { await delay(RetryDelay(attempt++), token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
+        }
+    }
+
+    private void BreakChannel(string reason)
+    {
+        latest = null;
+        var sequence = Interlocked.Increment(ref channelInterruption);
+        Interlocked.CompareExchange(ref firstChannelBreak,
+            new VisionChannelBreak(sequence, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), reason), null);
+        Changed?.Invoke();
     }
 
     /// <summary>
@@ -85,7 +157,8 @@ public sealed class VisionClient : IVisionClient
     /// <param name="token"></param>
     /// <returns></returns>
     /// <exception cref="IOException"></exception>
-    private async Task ReceiveAsync(WebSocket ws, CancellationToken token)
+    private async Task ReceiveAsync(WebSocket ws, CancellationToken token,
+        CancellationTokenSource? handshake = null, Action? onSubscribed = null)
     {
         var buffer = new byte[8193];
         VisionSample? lastAccepted = null;
@@ -97,7 +170,8 @@ public sealed class VisionClient : IVisionClient
                 WebSocketReceiveResult received;
                 do
                 {
-                    received = await ws.ReceiveAsync(new ArraySegment<byte>(buffer, count, buffer.Length - count), token).ConfigureAwait(false);
+                    received = await ws.ReceiveAsync(new ArraySegment<byte>(buffer, count, buffer.Length - count),
+                        !subscribed && handshake is not null ? handshake.Token : token).ConfigureAwait(false);
                     count += received.Count;
                     if (received.MessageType == WebSocketMessageType.Close)
                         throw new IOException("视觉通道已由后端关闭；请检查后端日志并重新连接");
@@ -108,36 +182,52 @@ public sealed class VisionClient : IVisionClient
                 var row = document.RootElement;
                 switch (row.GetProperty("type").GetString())
                 {
+                    case "subscribed":
+                        if (row.GetProperty("protocol").GetInt32() != 2 || row.GetProperty("schema").GetInt32() != 2 ||
+                            row.GetProperty("role").GetString() != "desktop")
+                            throw new IOException("订阅协议不兼容；请同步更新三端 protocol=2");
+                        var session = row.GetProperty("desktopSession").GetString();
+                        if (string.IsNullOrEmpty(session) || session.Length > 128 || subscribed && session != desktopSession)
+                            throw new IOException("桌面订阅会话非法");
+                        desktopSession = session;
+                        subscribed = true;
+                        handshake?.CancelAfter(Timeout.Infinite);
+                        onSubscribed?.Invoke();
+                        if (publisher.Length == 0) error = "";
+                        Changed?.Invoke();
+                        break;
+                    case "source_selected":
+                        if (!subscribed || row.GetProperty("protocol").GetInt32() != 2 || row.GetProperty("schema").GetInt32() != 2)
+                            throw new IOException("来源确认协议不兼容");
+                        var selected = row.GetProperty("publisher").GetString();
+                        if (string.IsNullOrEmpty(selected) || selected.Length > 128) throw new IOException("来源代次非法");
+                        if (selected == publisher) break;
+                        if (publisher.Length > 0) BreakChannel("视觉来源代次改变；旧控制授权失效");
+                        publisher = selected;
+                        error = suspensionReason = "";
+                        latest = null; lastAccepted = null;
+                        Changed?.Invoke();
+                        break;
                     case "pair_code":
-                        var code = row.GetProperty("code").GetString();
-                        var expiresIn = row.GetProperty("expiresIn").GetInt32();
-                        if (code is null || code.Length != 4 || code.Any(c => c < '0' || c > '9') || expiresIn is <= 0 or > 300)
-                            throw new IOException("配对协议不匹配；请重启最新版视觉后端，使用4位数字配对码");
-                        desktopSession = row.GetProperty("desktopSession").GetString()!;
-                        codeExpires = Environment.TickCount64 + expiresIn * 1000L;
-                        pairCode = code;
-                        break;
                     case "paired":
-                        publisher = row.GetProperty("publisher").GetString()!;
-                        pairCode = "";
-                        latest = null;
-                        lastAccepted = null;
-                        suspensionReason = "";
-                        break;
+                    case "channel_error":
+                    case "error":
+                        throw new IOException(row.TryGetProperty("reason", out var reason) ? reason.GetString() :
+                            "订阅协议不兼容；请同步更新三端 protocol=2，不支持旧配对码");
                     case "joints":
-                        if (error.Length > 0) break;
+                        if (!subscribed || row.GetProperty("protocol").GetInt32() != 2) throw new IOException("视觉信封协议非法");
+                        if (error.Length > 0 || publisher.Length == 0 || row.GetProperty("publisher").GetString() != publisher) break;
                         var sample = row.Deserialize<VisionSample>(Protocol.Json)!;
-                        if (!sample.HasValidData || sample.Publisher != publisher)
-                            throw new IOException("视觉数据非法或配对身份不符");
+                        if (!sample.HasValidData) throw new IOException("视觉数据非法");
                         var previous = lastAccepted;
                         if (previous is not null && (sample.Identity != previous.Identity ||
                             !sample.Home.SequenceEqual(previous.Home)))
-                            throw new IOException("视觉 session、校准或归位姿态改变，须重新配对对齐");
+                            throw new IOException("视觉 session、校准或归位姿态改变，须建立新来源并重新对齐");
                         if (previous is not null && (sample.Seq <= previous.Seq || sample.CaptureSeq <= previous.CaptureSeq ||
                             sample.CapturedAtMs <= previous.CapturedAtMs)) break;
                         if (!sample.IsSafe)
                         {
-                            SuspendSource("桌面接收时原始采集超过 300ms；配对保留，等待新采集");
+                            SuspendSource("桌面接收时原始采集超过 300ms；订阅保留，等待新采集");
                             break;
                         }
                         lastAccepted = sample;
@@ -147,12 +237,17 @@ public sealed class VisionClient : IVisionClient
                         break;
                     case "source_suspended":
                         if (error.Length > 0) break;
-                        if (publisher.Length == 0 || row.GetProperty("publisher").GetString() != publisher)
-                            throw new IOException("视觉暂挂配对身份不符");
-                        SuspendSource(row.GetProperty("reason").GetString() ?? "视觉数据暂挂；配对保留，等待新采集");
+                        if (row.GetProperty("protocol").GetInt32() != 2) throw new IOException("暂挂信封协议非法");
+                        if (publisher.Length == 0 || row.GetProperty("publisher").GetString() != publisher) break;
+                        SuspendSource(row.GetProperty("reason").GetString() ?? "视觉数据暂挂；订阅保留，等待新采集");
                         break;
                     case "source_invalid":
-                        error = row.GetProperty("reason").GetString() ?? "视觉来源已撤销";
+                        if (row.GetProperty("protocol").GetInt32() != 2) throw new IOException("撤权信封协议非法");
+                        if (publisher.Length == 0 || row.GetProperty("publisher").GetString() != publisher) break;
+                        if (error.Length == 0) {
+                            error = row.GetProperty("reason").GetString() ?? "视觉来源已撤销";
+                            BreakChannel(error);
+                        }
                         latest = null;
                         Changed?.Invoke();
                         break;
@@ -162,14 +257,14 @@ public sealed class VisionClient : IVisionClient
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !token.IsCancellationRequested)
         { if (error.Length == 0) error = "视觉来源失效：" + ex.Message; }
-        finally { latest = null; pairCode = ""; ws.Abort(); Changed?.Invoke(); }
+        finally { latest = null; ws.Abort(); Changed?.Invoke(); }
     }
 
     private void SuspendSource(string reason)
     {
         var interrupted = suspensionReason.Length == 0;
         latest = null;
-        suspensionReason = reason.Length > 0 ? reason : "视觉数据暂挂；配对保留，等待新采集";
+        suspensionReason = reason.Length > 0 ? reason : "视觉数据暂挂；订阅保留，等待新采集";
         // 递增标记不会被紧随其后的新帧覆盖；UI 必须先停旧控制流。
         if (interrupted) Interlocked.Increment(ref sourceInterruption);
         Changed?.Invoke();
@@ -224,39 +319,60 @@ public sealed class VisionClient : IVisionClient
     /// <returns></returns>
     public async Task PublishStatusAsync(BridgeState? state, bool fresh)
     {
-        if (!Connected || desktopSession.Length == 0 || Interlocked.Exchange(ref sending, 1) != 0) return;
+        var ws = socket; var session = desktopSession; var owner = cancellation;
+        if (!Connected || ws is null || owner is null || session.Length == 0 || Interlocked.Exchange(ref sending, 1) != 0) return;
         try
         {
             var data = JsonSerializer.SerializeToUtf8Bytes(new
             {
                 type = "motor_status",
-                desktopSession,
+                desktopSession = session,
                 state = StatusSnapshot(state, fresh, DateTimeOffset.UtcNow)
             }, Protocol.Json);
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation!.Token);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(owner.Token);
             timeout.CancelAfter(200);
-            await socket!.SendAsync(data.AsMemory(), WebSocketMessageType.Text, true, timeout.Token).ConfigureAwait(false);
+            await ws.SendAsync(data.AsMemory(), WebSocketMessageType.Text, true, timeout.Token).ConfigureAwait(false);
         }
-        catch (Exception ex) { error = "视觉摘要发送失败：" + ex.Message; latest = null; socket?.Abort(); Changed?.Invoke(); }
+        catch (Exception ex)
+        {
+            if (ReferenceEquals(socket, ws))
+            {
+                error = "视觉摘要发送失败：" + ex.Message;
+                subscribed = false;
+                BreakChannel(error);
+                ws.Abort();
+            }
+        }
         finally { Volatile.Write(ref sending, 0); }
     }
 
     /// <summary>
-    /// 释放资源并断开连接，取消接收线程，关闭 WebSocket，清空最新快照、配对码、桌面会话和发布者信息。
+    /// 取消连接意愿并收割唯一连接任务；迟到回调不能重新连接或恢复旧授权。
     /// </summary>
     /// <returns></returns>
     public async Task DisconnectAsync()
     {
-        cancellation?.Cancel();
-        socket?.Abort();
-        if (receiver is not null)
-            try { await receiver.ConfigureAwait(false); } catch (OperationCanceledException) { }
-        receiver = null;
-        socket?.Dispose(); socket = null;
-        cancellation?.Dispose(); cancellation = null;
-        latest = null; pairCode = ""; desktopSession = ""; publisher = ""; suspensionReason = "";
-        Changed?.Invoke();
+        await lifecycle.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            desiredConnected = false;
+            cancellation?.Cancel();
+            socket?.Abort();
+            if (receiver is not null)
+                try { await receiver.ConfigureAwait(false); } catch (OperationCanceledException) { }
+            receiver = null;
+            socket?.Dispose(); socket = null;
+            cancellation?.Dispose(); cancellation = null;
+            subscribed = false;
+            latest = null; desktopSession = publisher = suspensionReason = ""; error = "";
+            Changed?.Invoke();
+        }
+        finally { lifecycle.Release(); }
     }
 
-    public async ValueTask DisposeAsync() => await DisconnectAsync();
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+        await DisconnectAsync().ConfigureAwait(false);
+    }
 }

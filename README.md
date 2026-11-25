@@ -32,7 +32,7 @@
 - 一键逐轴启动位置环：准备 RAM 参数、核验静止、记录软件参考、应用运行设置、使能并确认运行反馈。
 - 电位器样式滑条控制相对角度，方向键按所选步进提交；实时流保留最新目标，不积压历史拖动轨迹。
 - 逐轴停止转动与力矩保持、人工继续、全部保持，以及独立的软急停和故障保护。
-- AI 视觉配对预览、逐轴捕获基准与启动、失锁保持/归位，以及同一视觉来源稳定后自动续跟随。
+- AI 视觉自动订阅预览、逐轴捕获基准与启动、失锁保持/归位，以及同一视觉来源稳定后自动续跟随。
 - 描述符与可读标量参数快照、运行反馈、曲线 CSV、会话诊断 JSON。
 - Python 内存 CAN 测试、Avalonia Headless 桌面测试和三端合成契约验证。
 
@@ -40,7 +40,7 @@
 
 - “速度控制”“力矩控制”虽然保留在来源列表中，但属于尚未实现的占位入口；目前可用的是“位置控制”和“AI视觉随动”。
 - 不自动机械置零、标定、刷写固件、保存 Flash 或任意修改驱动参数。
-- 不自动接管其他控制器已使能的电机，不因配对、重连、解除急停或恢复数据而自动首次使能。
+- 不自动接管其他控制器已使能的电机，不因订阅、重连、解除急停或恢复数据而自动首次使能。
 - 网页只发送目标，不接收或显示真实电机反馈；网页模型运动、发送计数均不能证明电机转动或到位。
 - 软件不会消除机械碰撞、负载下坠、夹伤、供电或布线风险，也不保证 Windows 是硬实时系统。
 
@@ -285,6 +285,8 @@ $PackageRoot = 'D:\CBA03-HostComputer'  # 替换为实际发布包位置
 
 重连建立新会话并清理本地旧控制状态，不清除驱动故障、不自动运动。“停机未确认”始终按未知处理，历史停止成功记录不能代替当前反馈。
 
+保护区分为简短首因、当前新鲜反馈、下一步人工操作三层。门极关闭只表示无保持力矩，不证明机械静止；本轴“异常”按钮提示只列简短原因、本轴反馈和操作条件，不拼接三轴停止历史。底部消息仅显示摘要，原始原因、请求结果与传输时序在“诊断详情”中展开查看；完整详情只在展开时限频刷新。
+
 ## 8. AI 视觉随动
 
 ### 三端组成与入口
@@ -315,22 +317,32 @@ $VisionRoot = [System.IO.Path]::GetFullPath((Join-Path $HostRoot '..\..\..\..\Ge
 
 `-WithMouthModel` 会准备口部模型，可能需要网络。`-OpenBrowser` 只打开页面。启动器默认拒绝占用端口；`-ReuseExisting` 只复用经项目身份检查的既有服务，不会自动重启旧服务。依赖/能力检查通过也不证明其已加载最新源码。
 
-### 推荐流程：先配对预览，再显式启动
+### 推荐流程：先自动订阅预览，再显式启动
 
-1. 三端同步使用预期源码/构建；如要重启既有现场服务，应先停止实机控制并人工确认。
-2. 在上位机选择“AI视觉随动”，点击顶部“连接视觉通道”。此操作不打开相机、不使能电机。
-3. 在网页进入视觉跟随，选择人脸或嘴部目标，再人工连接相机、居中校准并“开始跟随”。嘴部能力不可用时先核对模型与后端状态。
-4. 将上位机显示的 **4 位数字配对码** 输入网页，保留前导 0；码有效期最多 5 分钟。
-5. 只观察桌面 J角预览、新鲜度和逐轴启动受阻原因。配对只建立目标通道，不自动使能。
-6. 在机械条件确认后点击目标轴“启动”。本次点击包含该轴映射授权，程序核验方向、行程、归位及参考，捕获当前 J角和电机软件参考，只使能本轴。
-7. 要增加其他轴，分别显式启动；失锁或归位期间禁止新增轴，但仍可停止轴。
-8. 日常每轴停止只移除本轴跟随并减速保持；人工继续使用新基准，不复跑旧目标。
+1. 三端同步使用预期源码/构建；如要重启既有现场服务，应先停止实机控制并人工确认。新版要求 `protocol=2`，不兼容旧配对协议，不静默回退。
+2. 在上位机选择“AI视觉随动”，点击顶部“连接视觉通道”即自动订阅。网页加载即建立轻量订阅，启动顺序不限，无需输入配对码；无采集时显示等待。仅订阅不枚举设备、打开相机或使能电机。
+3. 网页人工进入视觉跟随，选择人脸或嘴部，再连接相机、居中校准并“开始跟随”。只订阅现有视觉 J角，网页手动/动画不是实机控制来源。
+4. 服务核验合法新鲜原始观测后确认唯一发布者及来源代次。空闲页不占来源；竞争页得到 `source_busy`，不能覆盖现有发布者。只观察桌面 J角预览、新鲜度和逐轴阻断原因。
+5. 机械条件确认后点击目标轴“启动”。核验方向、行程、归位及参考，捕获本次 J角和电机软件参考，只使能本轴；其他轴须分别显式启动。
+6. 日常每轴停止只移除本轴跟随并减速保持；人工继续使用新基准，不复跑旧目标。失锁或归位期间禁止新增轴，但仍可停止轴。
 
-界面保留“高级 / 多轴分步视觉随动”入口，但部分旧逐轴确认/分步控件已在当前 XAML 中隐藏。不要按历史截图寻找不存在的复选框；现行推荐入口是顶部配对和每轴圆形启动。
+逻辑订阅没有五分钟有效期。临时断线按 0.5/1/2/4 秒、随后最多 5 秒无限重试；成功握手重置退避。桌面握手限时 3 秒、网页 10 秒，服务协议 ping 每 10 秒、20 秒超时。保活不续电机 lease；只读摘要超过 2 秒仅标记未知/过期，不关闭订阅，也不能授权。
+
+暂停、切换模式和停止相机保留网页通道；暂停/校准/身份或归位改变先撤旧来源，再完整核验新 `source_begin`。发布者在暂停或异常时保留占有，网页真正退出才释放。桌面退出不撤网页发布资格，新桌面不补发缓存目标。重复订阅不重置来源或采集序号。
+
+真正断线后自动恢复的仅是轻量订阅/角度预览。网页不重放相机 start，须人员重新连接采集并开始跟随；桌面不清故障、不重新使能、不恢复旧授权，运行仍须逐轴人工启动。连接与来源中断计数、首次冻结证据独立于采集暂挂，瞬断后同一 UI tick 收到新帧也必须先撤旧流。主动断开、退出和页面关闭取消连接意愿；BFCache 返回只重新订阅。浏览器休眠期间不能保证物理连接永不中断。
+
+界面保留“高级 / 多轴分步视觉随动”入口，部分旧分步控件隐藏；推荐入口是顶部订阅和每轴圆形启动。订阅绿色不代表电机已经恢复。
+
+### 四项独立状态
+
+顶部视觉区分别显示原始采集年龄（≤300ms）、桌面已消费快照年龄（<150ms）、后端已接受 lease 年龄（<200ms）和当前控制流。后端 lease 年龄会加上快照之后的经过时间；没有接受记录或快照无效时显示未知，不能把“已发送 lease”当作“后端已接受”。无效未来时间也不能钳成零后显示新鲜。
+
+控制流区分正在跟随、日常保持、采集等待保持、失锁保持、故障与未知。视觉新鲜只描述原始采集，不证明电机可运行；逐轴启动仍受原有门控约束。
 
 ### 视觉样本与映射
 
-样本契约包括 `schema、unit、mode、publisher、visionSession、calibration、targetKind、seq、captureSeq、capturedAtMs、ageMs、angles、home、valid、faceCount、status`。
+视觉样本内容保持 `schema=1`：`schema、unit、mode、visionSession、calibration、targetKind、seq、captureSeq、capturedAtMs、ageMs、angles、home、valid、faceCount、status`。新版信封另含 `protocol=2` 与 `publisher` 来源代次；订阅握手使用 `schema=2、protocol=2、role=web/desktop`，返回 `subscribed`。
 
 - `schema=1、unit=deg、mode=face`；`targetKind` 可以是 `face` 或 `mouth`。
 - 三个角必须有限，模型几何范围为 J1/J2：[-135°, 135°]，J3：[0°, 80°]；与三台电机相对 ±135°保护范围不是同一层约束。
@@ -342,10 +354,10 @@ $VisionRoot = [System.IO.Path]::GetFullPath((Join-Path $HostRoot '..\..\..\..\Ge
 
 ### 采集暂缺与失锁的不同处理
 
-- **原采集过期/暂缺超过 300ms**：保留合法配对和本次流身份，减速进入“采集等待保持”；不会继续按旧帧跑，也不因这一原因写急停锁存。
+- **原采集过期/暂缺超过 300ms**：保留订阅和本次流身份，减速进入“采集等待保持”；不会继续按旧帧跑，也不因这一原因写急停锁存。
 - **有新鲜采集但未追踪到人**：进入“失锁保持”；持续至少 1 秒仍未恢复时，按已确认的归位姿态执行归位。归位和归位保持仍有力矩。
 - **同流恢复**：同身份、同校准、同参考的新鲜有效采集稳定至少 500ms 且至少 5 帧后，恢复仍授权的跟随；不重发 START。
-- **真实通道断开、来源撤销、身份/校准/归位或参考变化**：不属于采集暂缺，旧授权必须失效，按提示处理并重新配对/启动。
+- **真实通道断开、来源撤销、身份/校准/归位或参考变化**：不属于采集暂缺，旧授权必须失效，按提示处理；订阅自动恢复仅预览，电机须重新人工启动。
 - **电机反馈失联、门极异常、UI 租约或调度失效**：即使视觉已恢复，也不能绕过电机安全保护。
 
 网页不接收电机反馈，其“已提交/恢复”提示只描述目标通道。是否仍在跟随、已保持或须人工启动，以桌面当前反馈及保护状态为准。
@@ -400,6 +412,7 @@ $VisionRoot = [System.IO.Path]::GetFullPath((Join-Path $HostRoot '..\..\..\..\Ge
 | 后端快照 / UI tick | 目标约 50ms | 快照发布和 UI 消费；不是采集新鲜度 |
 | 桌面桥接快照新鲜度 | 年龄 <150ms，允许有限未来偏差 | 界面授权依据，后台收到不等于 UI 已消费 |
 | 连续目标 / lease 桌面应答 | 150ms | 排队、管道写入、应答等待共用请求预算 |
+| 桌面单次管道写入 | 最多 150ms；非停止类另取原请求剩余预算 | 排队后不刷新 deadline；停止类不因排队过期丢弃 |
 | UI 租约 | 超过 200ms 未有效续约 | UI 控制授权失效，活动轴安全保护 |
 | 电机位置/状态/门极 | 各 ≤200ms；故障字另要求 ≤1s | 轴有效反馈判据 |
 | 静止证据 | 500ms 窗口至少 6 个新采样，再确认 200ms | 静止不是仅看一次速度接近零；采样间隔另须合格 |
@@ -411,6 +424,15 @@ $VisionRoot = [System.IO.Path]::GetFullPath((Join-Path $HostRoot '..\..\..\..\Ge
 | 位置准备 / 阶段反馈等待 | 准备请求 5000ms；各 UI 核验阶段最多 3s | 不是整个启动流程仅有一个 3s 总预算 |
 
 普通切窗/失去窗口焦点不主动暂停。若实际 UI 调度、管道、有效续租或电机反馈真的超时，仍会停机；不应为了避免误停把接收线程改成无限代续 UI 租约。
+
+### Windows 管道写入与监督
+
+- Windows 唯一独立写线程同步写完整 UTF-8 JSON Lines 并 flush，不逐帧等待 ThreadPool 异步写入。入队事件立即唤醒；空闲 `WaitOne(50)` 不是固定发送延迟。仍按 urgent→lease→normal 使用原有有界队列，不增加队列容量、CAN 线程或生产 ThreadPool 配额。
+- 独立监督线程每 5ms 按单调时钟检查在途写入；非停止写预算为 `min(150ms, 原请求剩余预算)`，写前再次核验有效性。超限封闭写泵、结束通信授权，部分 JSON 不重试，旧目标不补发。
+- Windows 通过 SafeHandle 管理自有写线程句柄，`CancelSynchronousIo` 的返回只表示取消请求结果。`ERROR_NOT_FOUND` 按开始/完成竞争处理，必须再次核验真实完成和写线程退出；取消异常不能抢先覆盖当次超时诊断。
+- 取消后仍未退出则有界回收本实例自有 bridge，最多等待 800ms 后使用自有进程回收兜底。关闭窗口不无限等待写线程；结束 Python 进程不是机械停止确认，未知输出仍提示“停机未确认”。非 Windows 保留有界异步路径，本轮不新增跨平台验收承诺。
+
+续租仍只由活着且已消费新鲜快照的 UI 发起；写线程和监督线程不自行无限续租。150/200/50/300ms 请求、授权、活动调度和原采集判据保持不变。
 
 ### 会话、版本与流隔离
 
@@ -428,6 +450,8 @@ $VisionRoot = [System.IO.Path]::GetFullPath((Join-Path $HostRoot '..\..\..\..\Ge
 
 - `telemetry.fault` 是故障位掩码；当前原厂源码为过压 0x1、过流 0x2、急停 0x4、位置 0x8、欠压 0x10、驱动过温 0x20、电机过温 0x40。
 - 协议 `Error` 与 `HeartbeatFaultFlags` 是另外两类字段，不能相互替代，也不能用一次零心跳清除真实故障。
+- 未接管观察轴的残留故障只显示在本轴并阻止本轴启动，不升级为其他正常轴的组级停机。排除必须同时满足：同会话新鲜快照、轴已连接且反馈有效、未使能、Gate=false、不在启动中或当前流内、上一份本会话已消费反馈中也未使能，且不是“停止待确认/停机未确认”。手动和视觉共用这一边界。
+- 输出开启、门极未知、反馈无效、启动中、当前流成员或上一份反馈仍受控的故障轴不能按只读残留故障排除；受控轴故障和全局保护仍先撤权，再提交安全停机。故障轴不会被自动清错、接管或重新启动。
 - 桌面启动核验的协议空闲模式为 2，位置运行反馈模式为 5；这是 CAN 响应模式，不是 `command.mode` 或固件内部 FSM 的编号。
 - 主机“跟随误差超过 3°持续 200ms 自动停机”已取消；采样对齐误差和持续时间仍用于诊断。到位、归位超时、越限、驱动故障及通信保护没有因此取消。
 - 原厂 CAN timeout 清命令不等于本项目位置保持，也不等于已经确认门极关闭。QUERY/心跳不能替代驱动要求的控制命令刷新。
@@ -460,11 +484,19 @@ JSON 导出本身不续租、不发令，按导出时的 UI 已消费快照冻�
 | `estopRecovery、unownedStop` | 上次恢复/人工停止进度和结果；不是当前使能状态 |
 | `transport.latestFresh、latestRevision、uiConsumptionLagMs` | 区分后台接收与 UI 消费滞后 |
 | `transport.authorizationValid、intentRevision、acknowledgedStreamRevision` | 授权和结构请求版本交接 |
-| `transport.firstRequestTimeout` | 区分发送排队、管道写入和等待应答超时 |
-| `transport.firstLeaseFailure、firstUiProtection、recentUiTicks` | 首次续约失败、UI 保护与最近时序 |
+| `transport.firstRequestTimeout` | 进程级历史首超时，区分发送排队、管道写入和等待应答；不能替代当前 lease 首因 |
+| `transport.firstLeaseFailure.currentRequestTimeout、historicalFirstRequestTimeout` | 当次诊断异常证据与历史首超时分列；当次缺失时明确未知，不借用历史归因 |
+| `transport.firstLeaseFailure、firstUiProtection、recentUiTicks` | 首次续约失败、UI 首保护与最近时序；自动安全停机在撤权、清流和发送急停前冻结首因，`authorizationValidBeforeStop` 保留撤权前状态 |
+| `transport.recentTransport` | 当前会话最近至多16条传输时序；含队列、阶段、字节数、单调时戳和取消结果，不记录请求正文或来源凭据 |
+| `health、protectionFirstCause、protectionCurrentFeedback、protectionNextStep` | 四项独立状态及分层保护显示，未知/过期不是健康或已停机 |
+| `transport.firstUiProtection.reason、source、generation、axes` | 新增停机记录中的触发原因、当时来源/流及三轴故障、门极和新鲜度；`axes[].excludedIdleUnowned` 标明是否满足只读观察轴排除条件 |
 | `logs` | 会话日志；导出保留日志数组，不是无限持久化日志服务 |
 
+当次超时对象还包含 `queue、requestBytes、writerState、inflightAction、inflightAgeMs、lastWriteAgeMs、urgentDepth、leaseDepth、normalDepth、availableWorkers、originalDeadlineStamp、writeBudgetMs、cancellationResult`。队列阻塞者与本次请求分别记录；单调时戳仅用于本进程时序比较，取消返回不能当作写线程已经结束。`firstUiProtection.recentTransport` 是提交安全停机前的冻结记录，不会被后续急停或迟到应答替换。
+
 `diagnostics.response` 中的 draft 字段仍保留用于内部状态对照，不代表当前界面存在响应输入框。`controlSource` 应结合实际选择与当前流判断，占位控制来源不能视作可运行模式。
+
+后续急停产生的 Fault=0x4 不覆盖 `firstUiProtection`；它是本会话软件观察证据，不是原始 CAN 总线时序。仅凭停机后的截图或重连后的 JSON，不能认定急停位就是最初触发原因。
 
 ### 曲线
 
@@ -493,8 +525,8 @@ time_unix_s,mode,node,target_deg,position_deg,velocity_deg_s,iq_A
 | 目标发送后未到位 | TX 与新鲜实际反馈、到位/静止、限流、负载和驱动状态 | 用发送计数或网页模型证明实机到位 |
 | UI 租约/调度超时 | 原 JSON 的首因、排队/写入/应答等待、UI tick 和后台年龄 | 单纯提高 200ms 时限或让后台替 UI 无限续租 |
 | 连续目标 revision 拒绝 | 会话、应答接受版本、旧广播、generation、axisTokens | 盲目把 revision 加大并重发旧目标 |
-| 视觉连接无配对码 | 5189 服务身份、通道版本、码是否过期；按提示断开重连 | 将端口可达当作已配对/数据新鲜 |
-| 视觉已配对但启动受阻 | 单人 tracking、校准、原采集年龄、逐轴电机条件 | 把 WebSocket 心跳或旧 J角当作新采集 |
+| 视觉连接没有配对码 | 新版已取消；查看已订阅/等待采集/重连中、三端 protocol=2 与服务身份 | 将订阅或端口可达当作数据新鲜/电机授权 |
+| 视觉已订阅但启动受阻 | 单人 tracking、校准、原采集年龄、逐轴电机条件 | 把 WebSocket 心跳或旧 J角当作新采集 |
 | “采集等待保持” | 等待同来源稳定新帧，同时检查原采集与交付延迟 | 自动解锁急停、重复 START 或发送旧帧 |
 | Fault=4 或 Error=9 | 区分故障字、错误码和心跳分类，核对门极与清除条件 | 将所有 Error=9 当可清除急停 |
 | “停机未确认” | 实际运动、机械支撑、独立急停、停止 TX 错误及新 Gate 反馈 | 把串口关闭、程序退出或历史成功当当前已停 |
@@ -512,13 +544,14 @@ time_unix_s,mode,node,target_deg,position_deg,velocity_deg_s,iq_A
 & (Join-Path $HostRoot 'Start.ps1') -CheckOnly
 ```
 
-`Build` 恢复解决方案并隔离构建 Debug/Release。`Test` 运行 Python 和 Release 桌面测试；它不是 Publish，也不保证执行完整 Debug 构建。`Build.ps1` 每个成功任务写入 `build-<Task>.json`，Python 运行器写入 `python-tests.json`，桌面写入 `desktop.trx`。
+`Build` 恢复解决方案并隔离构建 Debug/Release。正在运行的 EXE 锁住默认产物时，可显式指定 `-ArtifactsPath <独立构建目录> -VerificationPath <独立结果目录>`，不会关闭现场程序；独立目录构建不改变默认源码启动入口。`Test` 运行 Python 和 Release 桌面测试；它不是 Publish，也不保证执行完整 Debug 构建。`Build.ps1` 每个成功任务写入 `build-<Task>.json`，Python 运行器写入 `python-tests.json`，桌面写入 `desktop.trx`。
 
 ### 单独执行
 
 ```powershell
-# 全部 Python 回归及记录。
-& (Join-Path $HostRoot '.venv\Scripts\python.exe') -X utf8 (Join-Path $HostRoot 'tests\python\run_tests.py')
+# 全部 Python 回归；显式指定独立结果目录，避免覆盖默认记录。
+$Verification = Join-Path $HostRoot 'artifacts\verification\auto-subscribe'
+& (Join-Path $HostRoot '.venv\Scripts\python.exe') -X utf8 (Join-Path $HostRoot 'tests\python\run_tests.py') --results-directory $Verification
 
 # 桌面测试，产物仍隔离；TRX 使用不同名称避免覆盖全量记录。
 $DesktopTests = Join-Path $HostRoot 'tests\HostComputer.Tests\HostComputer.Tests.csproj'
@@ -526,6 +559,8 @@ $BuildArtifacts = Join-Path $HostRoot 'artifacts\build'
 $TestResults = Join-Path $HostRoot 'artifacts\verification'
 dotnet test $DesktopTests -c Release -r win-x64 -p:SelfContained=false --artifacts-path $BuildArtifacts --results-directory $TestResults --logger 'trx;LogFileName=desktop-manual.trx'
 ```
+
+Python 运行器的 `--results-directory` 仅指定记录位置，不改变测试范围；省略时仍写入默认 `artifacts/verification/python-tests.json`。
 
 测试范围包括编解码、参数边界、内存 CAN 故障交错、逐轴启停、RAM 准备取消、静止/精度、限位、保持/急停恢复、UI 租约、目标版本交接、真实滑条输入与 Headless 布局。三端契约测试依赖同工作区网页和视觉源码；仅拷贝 HostComputer 时不要将缺少外部项目造成的失败解释为电机故障。
 
@@ -541,7 +576,17 @@ npm.cmd --prefix $WebRoot run build
 
 ### 已有验证记录的解释
 
-本文核对的最近记录：[Python](artifacts/verification/python-tests.json) 为 231 项通过、`hardwareAccess=false`；[桌面 TRX](artifacts/verification/desktop.trx) 为 429 项通过、0 失败。它们对应已有源码回归，不是编写本文时重新运行的测试，也不是实机验收。编写本文期间另行执行了源码入口 `Start.ps1 -CheckOnly`，检查通过，未启动应用或打开设备。
+本轮无配对码自动订阅的最终结果集中于 [auto-subscribe 汇总](artifacts/verification/auto-subscribe/verification-summary.json)：[Python](artifacts/verification/auto-subscribe/python-tests.json) 235/235、[Release 桌面全量](artifacts/verification/auto-subscribe/desktop-final-4.trx) 470/470、网页 127/127、视觉 80/80，均退出 0；网页构建通过。桌面全量包含三端契约、三轴瞬断即重连撤权、迟到响应、真实滑条输入及既有保护回归。
+
+[真实 WebSocket→内存 CAN](artifacts/verification/auto-subscribe/real-websocket-can.json) 覆盖桌面先启动、网页先启动两种顺序，仅使用测试自有随机端口和假相机；两场景的只订阅预览与重连 CAN 控制帧均为 0，故障仍保留。[三端合成契约](artifacts/verification/auto-subscribe/cross-project-contract.json) 覆盖两场景及 24 份桌面摘要，`success=true、hardwareAccess=false、webFeedback=false`。摘要不是电机授权或续租，订阅保活依靠独立 WebSocket ping/pong。
+
+1500×1020 与 1120×780 的 Headless 布局和最终截图已核验：无配对码控件，等待采集、未知 lease、逐轴阻断及故障首因仍独立显示，恢复新鲜预览不清故障。截图使用合成数据，不是浏览器或实机验收。
+
+[Debug/Release win-x64 构建记录](artifacts/verification/auto-subscribe/build-Build.json) 对应独立产物目录 `artifacts/verification/auto-subscribe/build`，双配置构建退出 0。`Start.ps1 -CheckOnly` 通过，但只核验依赖及默认 `artifacts/build` 源码入口存在，不启动应用，不证明该入口或现场程序已加载独立新版。
+
+本轮未修改计划文件，未 Publish/All、提交 Git、重启用户 EXE 或现场 5173/5189 服务，也未打开实体相机/串口、清错、置零或试转。此前 233/445、lease-boost 的 235/464/22 为历史基线；本轮较早失败的 `desktop-final.trx`（464/470）、`desktop-final-3.trx`（467/470）仍保留，最终验收以 `desktop-final-4.trx` 为准。夹具修正没有放宽生产保护时限或改动 BridgeClient 写泵。
+
+三端同步加载新版须另行确认，现场先只订阅预览。原归位超时和 UI 租约异常仍需原会话 JSON 及加载版本对照；取消配对码不代表这些故障已经解除。
 
 测试数量随源码变化，仅作为该次记录；后续以执行退出码、JSON success、TRX 结果、生成时间与实际加载源码为准。历史 `build-Publish.json` 或 `release-smoke.json` 不能证明当前源码已发布或现场故障已消失。
 
@@ -575,7 +620,7 @@ npm.cmd --prefix $WebRoot run build
 3. 对照本次 Python/TRX/构建记录，不把历史成功混入当前版本。
 4. 开窗仅验证未连接状态；真实设备验收需另外授权和现场操作方案。
 5. AI 模式同步部署对应网页/视觉版本；三端服务重启和浏览器刷新不会由 HostComputer 发布脚本完成。
-6. 现场先只读、只配对预览，再经机械确认按单轴小行程逐步验收，保存同会话诊断。
+6. 现场先只读、只订阅预览，再经机械确认按单轴小行程逐步验收，保存同会话诊断。
 
 ## 15. 开发约束与已知限制
 
@@ -606,6 +651,8 @@ npm.cmd --prefix $WebRoot run build
 - 真实三轴负载、机械安装、运动方向、行程裕量、限流和高速响应未由离线测试证明安全。
 - Windows 卡顿、系统睡眠、适配器排队及真实 CAN 干扰仍可能触发保护；切窗正常不等于允许真实失联。
 - 大多圈坐标精度、整数静止证据和实际固件能力需以当轴 JSON 与现场读回核对，不能自动置零规避。
+- 用户已现场确认手动位置控制反复停止问题解决；这一结论只适用于手动场景，不代替 AI 视觉验收。
+- 此前已离线复现并修复未接管关闭输出轴故障误升级组级锁存，以及 ThreadPool 压力下 Windows 管道交付阻塞的路径；本轮自动订阅保留这些回归与生产写泵。这些不是现场唯一归因：原会话桌面 JSON、网页诊断及实际加载版本仍需对照，后续 Fault=0x4 不能倒推最初原因。
 - 同流采集恢复与归位状态机已具备软件回归，但旧服务/旧 EXE 混用或实机异常须保留当次证据复验。
 - 速度/力矩来源、远程控制、通用参数编辑和固件升级不在当前已实现功能范围。
 - 程序退出只回收自有 bridge 子进程，不负责终止外部电机精灵或视觉服务；结束进程也不是停机确认。
