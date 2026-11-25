@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/HostComputer.Core/HostComputer.Core.csproj" />
+  <Project Path="src/HostComputer.App/HostComputer.App.csproj" />
+  <Project Path="tests/HostComputer.Tests/HostComputer.Tests.csproj" />
+</Solution>

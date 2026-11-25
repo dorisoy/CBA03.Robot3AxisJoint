@@ -1,0 +1,8 @@
+.venv/
+artifacts/
+tests/
+src/HostComputer.Core/obj/
+src/HostComputer.Core/bin/
+src/HostComputer.App/obj/
+src/HostComputer.App/bin/
+.vs/

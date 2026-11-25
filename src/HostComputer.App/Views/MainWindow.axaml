@@ -1,0 +1,400 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:HostComputer.App.ViewModels" xmlns:plot="using:HostComputer.App.Controls"
+        xmlns:icons="using:FluentIcons.Avalonia" x:Class="HostComputer.App.Views.MainWindow"
+        x:DataType="vm:MainViewModel" Title="CBA03 · 三轴位置台架" Width="1500" Height="1020" MinWidth="1120" MinHeight="780">
+    <Window.Resources>
+        <ControlTheme x:Key="PotentiometerSlider" TargetType="Slider">
+            <Setter Property="MinHeight" Value="74" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Border x:Name="PotentiometerPanel" Background="#0B1119" BorderBrush="#344252"
+                            BorderThickness="1" CornerRadius="6" Padding="8,7" BoxShadow="0 2 4 0 #80000000">
+                        <Grid RowDefinitions="10,36,10" RowSpacing="2">
+                            <Grid.Styles>
+                                <Style Selector="TickBar">
+                                    <Setter Property="ReservedSpace" Value="{Binding #PART_Track.Thumb.Bounds}" />
+                                    <Setter Property="IsHitTestVisible" Value="False" />
+                                </Style>
+                            </Grid.Styles>
+                            <TickBar Name="TopTickBar" Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                                     TickFrequency="{TemplateBinding TickFrequency}" Ticks="{TemplateBinding Ticks}"
+                                     Placement="Top" Orientation="Horizontal" Height="5" VerticalAlignment="Bottom"
+                                     IsDirectionReversed="{TemplateBinding IsDirectionReversed}" Fill="#637487" />
+                            <TickBar Name="TopMajorTickBar" Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                                     TickFrequency="{TemplateBinding plot:UserTargetSlider.MajorTickFrequency}" Placement="Top" Orientation="Horizontal"
+                                     Height="10" IsDirectionReversed="{TemplateBinding IsDirectionReversed}" Fill="#B5C7D9" />
+                            <Border Name="PotentiometerSlot" Grid.Row="1" Height="14" Margin="14,0" VerticalAlignment="Center"
+                                    CornerRadius="4" BorderBrush="#283746" BorderThickness="1" IsHitTestVisible="False">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                                        <GradientStop Offset="0" Color="#020509" />
+                                        <GradientStop Offset="0.6" Color="#080E16" />
+                                        <GradientStop Offset="1" Color="#202D3B" />
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                                <Grid>
+                                    <Border Height="7" Margin="1,0" CornerRadius="3" Background="{TemplateBinding Foreground}" Opacity="0.12" />
+                                    <Border Name="PotentiometerRail" Height="2" Margin="1,0" Background="{TemplateBinding Foreground}" Opacity="0.85" />
+                                </Grid>
+                            </Border>
+                            <Track Name="PART_Track" Grid.Row="1" Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                                   Value="{TemplateBinding Value, Mode=TwoWay}" IsDirectionReversed="{TemplateBinding IsDirectionReversed}"
+                                   Orientation="Horizontal">
+                                <Track.DecreaseButton>
+                                    <RepeatButton Name="PART_DecreaseButton" Focusable="False" Background="Transparent" Height="36" Padding="0" BorderThickness="0"
+                                                  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                        <RepeatButton.Template><ControlTemplate><Border Background="Transparent" /></ControlTemplate></RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.DecreaseButton>
+                                <Track.IncreaseButton>
+                                    <RepeatButton Name="PART_IncreaseButton" Focusable="False" Background="Transparent" Height="36" Padding="0" BorderThickness="0"
+                                                  HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                                        <RepeatButton.Template><ControlTemplate><Border Background="Transparent" /></ControlTemplate></RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.IncreaseButton>
+                                <Thumb Name="PotentiometerThumb" Width="28" Height="36" Focusable="False"
+                                       Foreground="{TemplateBinding Foreground}">
+                                    <Thumb.Template>
+                                        <ControlTemplate>
+                                            <Border Name="CursorBody" CornerRadius="3" BorderBrush="#718398" BorderThickness="1"
+                                                    BoxShadow="0 3 4 0 #C0000000">
+                                                <Border.Background>
+                                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                                                        <GradientStop Offset="0" Color="#82909D" />
+                                                        <GradientStop Offset="0.12" Color="#44515F" />
+                                                        <GradientStop Offset="0.5" Color="#2B3541" />
+                                                        <GradientStop Offset="0.9" Color="#17212C" />
+                                                        <GradientStop Offset="1" Color="#42505F" />
+                                                    </LinearGradientBrush>
+                                                </Border.Background>
+                                                <Grid Margin="3,2">
+                                                    <Border BorderBrush="#1A242F" BorderThickness="1" CornerRadius="1" />
+                                                    <Border Width="6" Margin="0,2" Background="{TemplateBinding Foreground}" Opacity="0.18" />
+                                                    <Border Name="CursorIndicator" Width="2" Margin="0,1" Background="{TemplateBinding Foreground}" />
+                                                    <Border Width="1" Margin="3,1,0,1" Background="#BFFFFFFF" />
+                                                </Grid>
+                                            </Border>
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track>
+                            <TickBar Name="BottomTickBar" Grid.Row="2" Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                                     TickFrequency="{TemplateBinding TickFrequency}" Ticks="{TemplateBinding Ticks}"
+                                     Placement="Bottom" Orientation="Horizontal" Height="5" VerticalAlignment="Top"
+                                     IsDirectionReversed="{TemplateBinding IsDirectionReversed}" Fill="#637487" />
+                            <TickBar Name="BottomMajorTickBar" Grid.Row="2" Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                                     TickFrequency="{TemplateBinding plot:UserTargetSlider.MajorTickFrequency}" Placement="Bottom" Orientation="Horizontal"
+                                     Height="10" IsDirectionReversed="{TemplateBinding IsDirectionReversed}" Fill="#B5C7D9" />
+                        </Grid>
+                    </Border>
+                </ControlTemplate>
+            </Setter>
+            <Style Selector="^:pointerover /template/ Border#PotentiometerPanel">
+                <Setter Property="BorderBrush" Value="#61758C" />
+            </Style>
+            <Style Selector="^:focus-visible /template/ Border#PotentiometerPanel">
+                <Setter Property="BorderBrush" Value="{Binding Foreground, RelativeSource={RelativeSource TemplatedParent}}" />
+            </Style>
+            <Style Selector="^:disabled /template/ Border#PotentiometerPanel">
+                <Setter Property="Opacity" Value="0.4" />
+            </Style>
+        </ControlTheme>
+    </Window.Resources>
+    <Window.Styles>
+        <Style Selector="StackPanel#ConnectionToolbar Button">
+            <Setter Property="Padding" Value="10,6" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="MinHeight" Value="32" />
+        </Style>
+        <Style Selector="Button.axisRound">
+            <Setter Property="Width" Value="64" />
+            <Setter Property="Height" Value="64" />
+            <Setter Property="MinWidth" Value="64" />
+            <Setter Property="MinHeight" Value="64" />
+            <Setter Property="CornerRadius" Value="32" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="HorizontalAlignment" Value="Center" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="Button.axisRound.abnormal">
+            <Setter Property="BorderBrush" Value="#FFBD69" />
+            <Setter Property="BorderThickness" Value="2" />
+        </Style>
+        <Style Selector="StackPanel#ConnectionToolbar ComboBox">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="MinHeight" Value="32" />
+        </Style>
+    </Window.Styles>
+    <Grid RowDefinitions="Auto,Auto,Auto,*,Auto" Margin="16,12">
+        <Grid x:Name="Header" 
+              ColumnDefinitions="Auto,Auto,*" 
+              RowDefinitions="Auto,Auto" 
+              Margin="0,0,0,8">
+            <StackPanel x:Name="HeaderTitle" VerticalAlignment="Center">
+                <TextBlock Text="CBA03 / LAB" FontSize="22" FontWeight="SemiBold" LetterSpacing="1" />
+            </StackPanel>
+            <StackPanel x:Name="ConnectionToolbar"
+                        Grid.Column="1"
+                        Orientation="Horizontal"
+                        Spacing="6"
+                        Margin="12,0"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Left">
+                <ComboBox ItemsSource="{Binding Ports}" SelectedItem="{Binding SelectedPort}" IsEnabled="{Binding CanChangeConnection}" Width="220" PlaceholderText="自动扫描 / 选择端口" ToolTip.Tip="{Binding SelectedPort.Evidence}" />
+                <Button Content="刷新端口" Command="{Binding RefreshPortsCommand}" />
+                <Button Content="连接电机" Command="{Binding ConnectCommand}" Classes="primary" ToolTip.Tip="Classic CAN 1 Mbit/s；自动识别 ID1/2/3 在线节点，单台即可；连接不自动启动" />
+                <Button Content="断开 / 取消" Command="{Binding DisconnectCommand}" />
+            </StackPanel>
+            <StackPanel
+                x:Name="HeaderActions"
+                Grid.Column="2"
+                Spacing="4"
+                Margin="6,0"
+                Orientation="Horizontal"
+                VerticalAlignment="Center"
+                HorizontalAlignment="Right">
+               <ComboBox ItemsSource="{Binding ControlSources}" SelectedIndex="{Binding ControlSourceIndex}" IsEnabled="{Binding CanSelectSource}" Margin="0,4,10,4" />
+                    <CheckBox x:Name="RealTimeCheck" Content="实时控制（最新目标）" IsChecked="{Binding RealTimeControl}" IsEnabled="{Binding CanToggleRealTime}" ToolTip.Tip="{Binding RealTimeHint}" Margin="0,0,12,4" />
+                    <Button Content="暂停保持" Command="{Binding PauseCommand}" Margin="0,0,8,4" />
+                    <Button x:Name="StopAllButton" Content="全部停止" Command="{Binding StopCommand}" Classes="danger" Margin="0,0,8,4" ToolTip.Tip="全部停止转动并保持力矩；上位机继续运行，不发送 STOP/ESTOP。重新点击本轴启动恢复控制；急停、真实故障、失联、断开仍安全停机。未接管电机不自动接管。" />
+                    <Button Content="三轴使能" Command="{Binding EnableAllCommand}" Margin="0,0,8,4" />
+                    <TextBlock Text="步进" VerticalAlignment="Center" FontSize="12" Margin="4,0,6,4" />
+                    <ComboBox ItemsSource="{Binding Steps}" SelectedItem="{Binding StepSize}" Width="70" 
+                              ToolTip.Tip="仅改变滑条方向键步进；鼠标角度映射、刻度及底层CAN调度不变" />
+                    <Button Command="{Binding EstopCommand}" 
+                            Classes="danger" 
+                            Margin="8,0,0,4">
+                        <StackPanel Orientation="Horizontal" 
+                                    Spacing="6">
+                            <icons:SymbolIcon Symbol="Warning" />
+                            <TextBlock Text="软急停" />
+                        </StackPanel>
+                    </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- <Border x:Name="ConnectionStatus" Grid.Row="1" Classes="panel" Padding="10,6" Margin="0,0,0,8">
+        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="3">
+        <TextBlock Text="{Binding Banner}" Foreground="#F3BD69" FontWeight="SemiBold" FontSize="12" TextWrapping="Wrap" />
+        <TextBlock Grid.Column="1" Text="{Binding ConnectionSummary}" Classes="muted" FontSize="12" VerticalAlignment="Center" />
+        <TextBlock Grid.Row="1" Text="{Binding PortStatus}" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding PortStatus}" />
+        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding Timing}" Classes="muted" FontSize="11" HorizontalAlignment="Right" />
+        </Grid>
+        </Border>-->
+
+        <Border x:Name="VisionSetupPanel" Grid.Row="1" IsVisible="{Binding IsVision}" Classes="panel" Padding="10,6" Margin="0,0,0,8">
+            <StackPanel Spacing="4">
+                <WrapPanel x:Name="VisionConnectionToolbar">
+                    <TextBlock Text="AI视觉随动" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,14,4" />
+                    <Button x:Name="ConnectVisionButton" Content="连接视觉通道" Command="{Binding ConnectVisionCommand}" Padding="10,5" Margin="0,0,8,4" ToolTip.Tip="连接本机视觉服务；不打开相机、不使能电机" />
+                    <Button x:Name="DisconnectVisionButton" Content="断开视觉通道" Command="{Binding DisconnectVisionCommand}" Padding="10,5" Margin="0,0,12,4" />
+                    <Border x:Name="VisionPairCodePanel" IsVisible="{Binding HasVisionPairCode}" BorderBrush="#70E4B5" BorderThickness="1" CornerRadius="4" Padding="8,2" Margin="0,0,0,4">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="网页配对码" VerticalAlignment="Center" FontSize="12" />
+                            <TextBlock x:Name="VisionPairCodeText" Text="{Binding PairCode}" FontSize="22" LetterSpacing="4" Foreground="#70E4B5" />
+                        </StackPanel>
+                    </Border>
+                </WrapPanel>
+                <TextBlock x:Name="VisionSetupSteps" Text="① 连接视觉通道 → ② 网页校准并开始跟随 → ③ 在网页输入配对码 → ④ 新鲜 J角到达后，点击本轴“启动”。配对只预览，不自动使能。" TextWrapping="Wrap" FontSize="11" Classes="muted" />
+                <TextBlock x:Name="VisionReadyStatus" Text="{Binding VisionStatus}" TextWrapping="Wrap" FontSize="12" Foreground="#70E4B5" />
+                <ItemsControl x:Name="VisionAxisStartReasons" ItemsSource="{Binding Axes}">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Columns="3" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:AxisViewModel">
+                            <TextBlock Text="{Binding VisionStartHint}" TextWrapping="Wrap" FontSize="11" Foreground="{Binding Accent}" Margin="0,0,8,0" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </Border>
+
+        <Border IsVisible="{Binding NeedsConnectionRecovery}"
+                BorderBrush="#806740"
+                BorderThickness="1"
+                CornerRadius="5"
+                Padding="8"
+                Grid.Row="2"
+                x:Name="SafetyBar"
+                Classes="panel"
+                Margin="0,0,0,8">
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                <TextBlock Text="{Binding ConnectionRecoveryHint}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="#F3BD69" />
+                <Button x:Name="RestoreConnectionButton" Grid.Column="1" Content="恢复连接（不启动）" Command="{Binding RestoreConnectionCommand}" />
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="3" ColumnDefinitions="*,330" ColumnSpacing="10">
+            <ScrollViewer x:Name="MainScroll" Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Spacing="14">
+                    <ItemsControl ItemsSource="{Binding Axes}">
+                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Columns="3" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:AxisViewModel">
+                                <Border Classes="panel" Margin="0,0,8,0" Padding="12">
+                                    <StackPanel Spacing="5">
+                                        <Button Command="{Binding SelectCommand}" HorizontalAlignment="Stretch" Background="Transparent" Padding="0">
+                                            <TextBlock Text="{Binding Title}" Foreground="{Binding Accent}" FontSize="15" FontWeight="SemiBold" />
+                                        </Button>
+                                        <TextBlock Text="{Binding Status}" FontSize="12" TextTrimming="CharacterEllipsis" />
+                                        <Grid ColumnDefinitions="*,*" ColumnSpacing="6">
+                                            <Button Content="{Binding StartButtonText}" Command="{Binding StartPositionCommand}" Classes="primary axisRound" ToolTip.Tip="{Binding PositionControlHint}" />
+                                            <Button Grid.Column="1" Content="{Binding StopButtonText}" Command="{Binding StopMotorCommand}" Classes="danger axisRound" Classes.abnormal="{Binding IsAbnormal}" ToolTip.Tip="{Binding StopMotorHint}" />
+                                        </Grid>
+                                        <!-- <TextBlock Text="{Binding PositionControlHint}" FontSize="11" TextWrapping="Wrap" Foreground="#F3BD69" />-->
+                                        <Border IsVisible="{Binding ShowUnownedStop}" BorderBrush="#806740" BorderThickness="1" CornerRadius="5" Padding="8">
+                                            <StackPanel Spacing="5">
+                                                <TextBlock Text="人工停止未接管电机 / 不启动" FontWeight="SemiBold" Foreground="#F3BD69" TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding UnownedStopText}" TextWrapping="Wrap" FontSize="11" />
+                                                <CheckBox IsChecked="{Binding UnownedStopConfirmed}" IsEnabled="{Binding CanAcknowledgeUnownedStop}">
+                                                    <TextBlock Text="其他控制器已停发；机械支撑就绪；同意停止本轴（无保持力矩）" TextWrapping="Wrap" FontSize="11" />
+                                                </CheckBox>
+                                                <Button Content="停止未接管电机（不启动）" Command="{Binding StopUnownedCommand}" HorizontalAlignment="Stretch" Padding="5,8" FontSize="12" />
+                                                <TextBlock Text="{Binding UnownedStopBlockReason}" TextWrapping="Wrap" FontSize="11" Foreground="#F3BD69" />
+                                            </StackPanel>
+                                        </Border>
+                                        <plot:AxisGauge Actual="{Binding Actual}" Target="{Binding Target}" Preview="{Binding VisionPreview}" DisplayText="{Binding PositionText}" Accent="{Binding Accent}" Minimum="{Binding DisplayHardLow}" Maximum="{Binding DisplayHardHigh}" HorizontalAlignment="Stretch" />
+                                        <TextBlock Text="{Binding VisionText}" Foreground="#70E4B5" FontSize="11" TextWrapping="Wrap" />
+                                        <TextBlock Text="{Binding Detail}" Classes="muted" LineHeight="17" FontSize="11" TextWrapping="Wrap" />
+                                        <Border Height="1" Background="#2A3647" Margin="0,3" />
+                                        <Grid ColumnDefinitions="*,Auto">
+                                            <TextBlock Grid.Column="1" Text="{Binding Pending, StringFormat=' {0:0.00}°'}" Foreground="{Binding Accent}" FontWeight="SemiBold" />
+                                        </Grid>
+                                        <plot:UserTargetSlider Theme="{StaticResource PotentiometerSlider}" Foreground="{Binding Accent}"
+                                                               Value="{Binding Pending, Mode=OneWay}" Minimum="{Binding DisplayHardLow}" Maximum="{Binding DisplayHardHigh}"
+                                                               TickFrequency="{Binding SliderTickFrequency}" TickPlacement="Outside" IsSnapToTickEnabled="False"
+                                                               SmallChange="{Binding SliderStep}" IsEnabled="{Binding CanEditTarget}">
+                                            <ToolTip.Tip>
+                                                <StackPanel Spacing="4" MaxWidth="360">
+                                                    <TextBlock Text="{Binding SliderControlHint}" TextWrapping="Wrap" />
+                                                    <TextBlock Text="刻度与仪表保护范围一致；保护端点不可下发，不自动钳位。真实拖动或方向键才提交目标。" TextWrapping="Wrap" />
+                                                </StackPanel>
+                                            </ToolTip.Tip>
+                                        </plot:UserTargetSlider>
+                                        <Grid ColumnDefinitions="*,*,*" Margin="23,0">
+                                            <TextBlock Text="{Binding DisplayHardLow, StringFormat='{}{0:0.#}°'}" Classes="muted" FontSize="11" />
+                                            <TextBlock Grid.Column="1" Text="{Binding DisplayHardMid, StringFormat='{}{0:0.#}°'}" HorizontalAlignment="Center" Classes="muted" FontSize="11" />
+                                            <TextBlock Grid.Column="2" Text="{Binding DisplayHardHigh, StringFormat='{}{0:0.#}°'}" HorizontalAlignment="Right" Classes="muted" FontSize="11" />
+                                        </Grid>
+                                <!--        <TextBlock Text="{Binding SliderControlHint}" FontSize="11" TextWrapping="Wrap" Foreground="{Binding Accent}" />-->
+                                       <!-- <TextBlock Text="{Binding RangeHint}" FontSize="11" TextWrapping="Wrap" Foreground="#F3BD69" />-->
+
+                                       <!-- <Expander Header="高级分步操作" 
+                                                  IsExpanded="False" 
+                                                  HorizontalAlignment="Stretch">
+                                            <StackPanel Spacing="5">
+                                                <TextBlock Text="{Binding Readiness}" FontSize="11" TextWrapping="Wrap" Foreground="#F3BD69" />
+                                                <Button Content="准备位置控制（仅 RAM）" Command="{Binding PrepareCommand}" HorizontalAlignment="Stretch" Padding="5,8" FontSize="12" ToolTip.Tip="写入 input_mode=1、enable_vel_limit=true 并读回；不保存 Flash、不使能、不下发运动。" />
+                                                <Grid ColumnDefinitions="*,*" ColumnSpacing="6">
+                                                    <Button Content="① 记录参考" Command="{Binding ReferenceCommand}" HorizontalAlignment="Stretch" Padding="5,8" />
+                                                    <Button Grid.Column="1" Content="② 使能本轴" Command="{Binding EnableCommand}" HorizontalAlignment="Stretch" Padding="5,8" />
+                                                </Grid>
+                                            </StackPanel>
+                                        </Expander>-->
+
+                               <!--         <TextBlock Text="{Binding TransmissionStatus}" FontSize="11" TextWrapping="Wrap" Classes="muted" />-->
+                                        <!--<Expander Header="控制诊断 / 禁用原因" 
+                                                  IsExpanded="False" HorizontalAlignment="Stretch">
+                                            <TextBlock Text="{Binding ControlDiagnostics}" FontSize="11" TextWrapping="Wrap" Foreground="#F3BD69" />
+                                        </Expander>-->
+                                        <!--<Expander Header="视觉参与 / 逐轴确认" 
+                                                  IsExpanded="False" HorizontalAlignment="Stretch">
+                                            <StackPanel IsEnabled="{Binding CanConfirmMapping}">
+                                                <CheckBox Content="选择本轴参与视觉" IsChecked="{Binding VisionSelected}" />
+                                                <CheckBox Content="方向已手动小行程验证" IsChecked="{Binding DirectionConfirmed}" />
+                                                <CheckBox Content="软件行程已确认" IsChecked="{Binding RangeConfirmed}" />
+                                                <CheckBox Content="归位姿态已确认" IsChecked="{Binding HomeConfirmed}" />
+                                                <CheckBox Content="模型与电机参考对应" IsChecked="{Binding ReferenceConfirmed}" />
+                                            </StackPanel>
+                                        </Expander>
+                                        <TextBlock Text="{Binding Telemetry}" Classes="muted" TextWrapping="Wrap" MinHeight="30" />-->
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Border IsVisible="{Binding IsVision}" Classes="panel" Padding="12">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="高级 / 多轴分步视觉随动" FontSize="16" />
+                            <WrapPanel>
+                                <Button Content="捕获并确认对齐" Command="{Binding AlignVisionCommand}" Margin="0,0,8,4" />
+                                <Button Content="开始实机跟随" Command="{Binding FollowVisionCommand}" Classes="primary" Margin="0,0,8,4" />
+                            </WrapPanel>
+                            <TextBlock Text="{Binding MappingPreview}" Classes="muted" TextWrapping="Wrap" />
+                            <TextBlock Text="逐轴随动：在顶部完成视觉配对，待新鲜 J角到达后点击各轴“启动”，分别捕获本次基准并仅使能本轴；已受控轴继续。每轴日常停止仅移除本轴随动并减速保持，顶部“全部停止”使受控轴减速保持；均不发停止帧、不关闭电机输出。再次点击启动从新基准恢复，不执行旧目标。失锁或归位中不能新增轴，但仍可停止轴。多轴分步确认入口保留。J1→ID1、J2→ID2、J3→ID3；重新连接、重校准或改参考后须重新捕获；归位和保持仍有力矩。" TextWrapping="Wrap" Foreground="#F3BD69" />
+                        </StackPanel>
+                    </Border>
+                    <Border Classes="panel" Padding="14">
+                        <StackPanel Spacing="8">
+                            <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                                <TextBlock Text="实时曲线" FontSize="15" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1" ItemsSource="{Binding CurveModes}" SelectedIndex="{Binding CurveMode}" Width="140" HorizontalAlignment="Left" Margin="14,0" />
+                                <CheckBox Grid.Column="2" Content="仅暂停曲线显示" IsChecked="{Binding CurvePaused}" Margin="0,0,12,0" />
+                                <Button Grid.Column="3" Content="导出 CSV" Click="ExportCsv" />
+                            </Grid>
+                            <plot:TelemetryPlot x:Name="Plot" Height="210" />
+                        </StackPanel>
+                    </Border>
+                    <Border Classes="panel" Padding="14">
+                        <StackPanel Spacing="8"><TextBlock Text="会话日志 / 最新在前" FontSize="15" />
+                            <TextBox Text="{Binding Logs, Mode=OneWay}" IsReadOnly="True" Height="130" TextWrapping="Wrap" AcceptsReturn="True" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+            <Border Grid.Column="1" Classes="panel" Padding="14">
+                <Grid RowDefinitions="Auto,Auto,*">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Text="参数与运行设置" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            <ComboBox Grid.Column="1" ItemsSource="{Binding NodeNames}" SelectedIndex="{Binding SelectedNodeIndex}" Width="80" />
+                        </Grid>
+                <!--        <TextBlock Text="参数表只读；位置准备仅改两个 RAM 参数并读回，不写 Flash。&#10;当前列为最近读回缓存；遥测失效显示未知。&#10;截图参考不作为实机门控依据。" Classes="muted" TextWrapping="Wrap" />-->
+                        <Expander Header="临时运行设置 / 未使能时调整" IsExpanded="False" HorizontalAlignment="Stretch">
+                            <StackPanel Spacing="8" DataContext="{Binding SelectedAxis}" x:DataType="vm:AxisViewModel">
+                                <TextBlock Text="速度自动取连接时读回的固件上限内最大整数 RPM，加减速度固定360°/s²；不提供响应输入控件。此处仅在本轴停止后显式应用运行设置，不自动启动。" FontSize="11" TextWrapping="Wrap" Classes="muted" />
+                                <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="6" IsEnabled="{Binding CanConfigure}">
+                                    <TextBlock Text="保护下限 / °（相对）" /><TextBlock Grid.Column="1" Text="保护上限 / °（相对）" />
+                                    <TextBox Grid.Row="1" Text="{Binding LowText}" /><TextBox Grid.Row="1" Grid.Column="1" Text="{Binding HighText}" />
+                                    <TextBlock Grid.Row="2" Text="临时限流 / A" /><CheckBox Grid.Row="2" Grid.Column="1" Content="反向 -1" IsChecked="{Binding Reverse}" />
+                                    <TextBox Grid.Row="3" Text="{Binding AmpsText}" /><Button Grid.Row="3" Grid.Column="1" Content="应用全部本轴设置" Command="{Binding ApplyCommand}" />
+                                </Grid>
+                            </StackPanel>
+                        </Expander>
+                        <ComboBox ItemsSource="{Binding ParameterGroups}" SelectedIndex="{Binding ParameterGroup}" HorizontalAlignment="Stretch" />
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                            <Button Content="读取快照" Command="{Binding RefreshParametersCommand}" HorizontalAlignment="Stretch" />
+                            <Button Grid.Column="1" Content="导出诊断 JSON" Click="ExportJson" HorizontalAlignment="Stretch" ToolTip.Tip="导出所选轴参数、故障码、速度及按钮禁用原因；不发送运动指令" />
+                        </Grid>
+                    </StackPanel>
+                    <Grid Grid.Row="1" ColumnDefinitions="*,70,70" Margin="0,16,0,8">
+                        <TextBlock Text="参数 / 固件单位" Classes="muted" /><TextBlock Grid.Column="1" Text="截图参考" Classes="muted" /><TextBlock Grid.Column="2" Text="当前快照" Classes="muted" />
+                    </Grid>
+                    <ScrollViewer Grid.Row="2">
+                        <ItemsControl ItemsSource="{Binding Parameters}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:ParameterRow">
+                                    <Border BorderBrush="#263245" BorderThickness="0,0,0,1" Padding="0,9">
+                                        <StackPanel Spacing="4">
+                                            <Grid ColumnDefinitions="*,70,70">
+                                                <TextBlock Text="{Binding Label}" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Name}" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Reference}" Foreground="#8091A7" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Grid.Column="2" Text="{Binding Online}" Foreground="#A9D2DF" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Online}" />
+                                            </Grid>
+                                            <TextBlock Text="{Binding Unit}" FontSize="10" Foreground="#718398" />
+                                            <TextBlock Text="{Binding Difference}" FontSize="10" Foreground="#718398" />
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </Grid>
+        <Border Grid.Row="4" Background="#212B38" CornerRadius="6" Padding="10,6" Margin="0,8,0,0">
+            <TextBlock Text="{Binding Message}" TextWrapping="Wrap" Foreground="#F3BD69" />
+        </Border>
+    </Grid>
+</Window>

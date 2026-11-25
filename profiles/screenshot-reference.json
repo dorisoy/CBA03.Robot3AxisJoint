@@ -1,0 +1,24 @@
+{
+  "source": "用户提供的电机精灵截图参考；不是三台电机在线读回值",
+  "warnings": ["0～67V 是截图保护设置，不是推荐供电范围", "已校准不代表实机在线标定状态", "相间电阻/电感不直接换算为固件单相 r_phase 或 Ld/Lq"],
+  "parameters": [
+    {"name":"config.ppairs","label":"极对数","value":11,"unit":"","group":"电机参数"},
+    {"name":"config.gr","label":"减速比","value":9,"unit":"转子/输出","group":"电机参数"},
+    {"name":"config.kt","label":"KT","value":0.03292,"unit":"N·m/A","group":"电机参数"},
+    {"name":"reference.phaseResistance","label":"相间电阻（原标注）","value":0.396,"unit":"Ω","group":"电机参数"},
+    {"name":"reference.phaseInductance","label":"相间电感（原标注）","value":0.000022,"unit":"H","group":"电机参数"},
+    {"name":"config.i_max","label":"相电流限制","value":12,"unit":"A","group":"电机参数"},
+    {"name":"config.torque_lim","label":"输出力矩限制","value":3,"unit":"N·m","group":"电机参数"},
+    {"name":"reference.maxRpm","label":"截图最大速度","value":433.33,"unit":"RPM","group":"电机参数"},
+    {"name":"config.i_cal","label":"标定电流","value":5,"unit":"A","group":"电机参数"},
+    {"name":"config.pll_bandwidth","label":"编码器带宽","value":3000,"unit":"Hz","group":"电机参数"},
+    {"name":"reference.voltageLow","label":"截图低压保护","value":0,"unit":"V","group":"驱动参数"},
+    {"name":"reference.voltageHigh","label":"截图高压保护","value":67,"unit":"V","group":"驱动参数"},
+    {"name":"config.input_mode","label":"位置滤波输入模式","value":3,"unit":"枚举","group":"驱动参数"},
+    {"name":"config.i_bw","label":"电流环带宽","value":1000,"unit":"Hz","group":"驱动参数"},
+    {"name":"config.vel_gain","label":"速度 KP","value":1.397,"unit":"固件单位","group":"驱动参数"},
+    {"name":"config.vel_integrator_gain","label":"速度 KI","value":25.152,"unit":"固件单位","group":"驱动参数"},
+    {"name":"config.pos_gain","label":"位置 KP","value":20,"unit":"固件单位","group":"驱动参数"},
+    {"name":"config.input_bw","label":"位置滤波带宽","value":10,"unit":"1/s","group":"驱动参数"}
+  ]
+}
