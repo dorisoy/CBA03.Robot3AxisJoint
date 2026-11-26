@@ -1,4 +1,4 @@
-"""控制流、视觉对齐与失锁归位；只由 Engine 单线程调用。"""
+"""控制流、视觉对齐与失锁原位保持；只由 Engine 单线程调用。"""
 
 import copy
 import math
@@ -112,7 +112,7 @@ class MotionStreams:
         if any(self.engine.axes[n].owned or n in self.nodes for n in nodes):
             raise ValueError("捕获轴必须停止输出")
         if self.source not in ("none", "vision") or (self.source == "vision" and self.state != "跟随"):
-            raise ValueError("来源互斥或失锁归位中；禁止新增对齐")
+            raise ValueError("来源互斥或视觉保持等待中；禁止新增对齐")
         sample = data.get("sample")
         validate_sample(sample)
         if not sample["valid"]:
@@ -210,7 +210,7 @@ class MotionStreams:
             sample = data.get("sample")
             validate_sample(sample)
             if self.state != "跟随" or not sample["valid"] or not self.alignment_matches(nodes, sample):
-                raise ValueError("失锁、归位或对齐无效；禁止新增视觉轴")
+                raise ValueError("失锁、采集等待或对齐无效；禁止新增视觉轴")
         for a in axes:
             if a.trajectory is None or a.trajectory.segments or abs(a.trajectory.velocity) > .2:
                 raise ValueError("新增轴须从当前位置保持开始")
@@ -361,6 +361,7 @@ class MotionStreams:
                 if self.state == "跟随":
                     self.hold()
                     self.state = "失锁保持"
+                    self.engine.log("视觉目标失锁，减速后原位保持；不归位、不撤销同源控制流")
         else:
             if self.good_at is None:
                 self.good_at = now
@@ -373,11 +374,13 @@ class MotionStreams:
     def wait_for_capture(self, rejected=None, age=None):
         # 仅视觉采集暂缺：电机反馈、门极、租约和调度保护仍由 Engine 独立核验。
         # 保留本次流代次与身份；不写首故障、不发急停、不允许旧帧恢复运动。
+        if self.source == "vision":
+            # 等待中再次采集停顿，也不能把旧有效帧累计成连续稳定确认。
+            self.good_at, self.good_frames = None, 0
         if self.source == "vision" and self.state != "采集等待保持":
             self.hold()
             self.record_capture_wait(self.engine.clock(), rejected, age)
             self.state = "采集等待保持"
-            self.good_at, self.good_frames = None, 0
             self.arrived_at = self.deadline = None
             self.engine.log("视觉采集超过300ms，减速保持等待新帧；不锁存、不重新启动")
 
@@ -406,33 +409,12 @@ class MotionStreams:
             return
         self.selected(self.nodes)
         stable = self.good_at is not None and now - self.good_at >= .5 and self.good_frames >= 5
-        if self.state == "采集等待保持" and stable:
-            self.state, self.lost_at = "跟随", None
+        # 失锁多久都不归位；保持期间只由同源的新鲜有效采集累计恢复证据。
+        # 真租约、反馈和门极故障仍在 Engine 中独立保护，不能用重锁帧清除。
+        if self.state in ("采集等待保持", "失锁保持") and stable:
             self.targets(self.latest_targets)
-            self.engine.log("同一视觉身份新鲜采集已稳定，自动恢复本次跟随；未重发START")
-        if self.state == "失锁保持":
-            if stable:
-                self.state, self.lost_at = "跟随", None
-                self.targets(self.latest_targets)
-            elif now - self.lost_at >= 1:
-                goals = {str(n): self.engine.axes[n].zero + self.engine.axes[n].direction *
-                         (self.alignment["home"][n - 1] - self.alignment["reference"][n - 1])
-                         for n in self.nodes}
-                self.targets(goals)
-                duration = max(sum(s[0] for s in self.engine.axes[n].trajectory.segments) for n in self.nodes)
-                self.deadline, self.state = now + duration + 2, "归位中"
-        if self.state == "归位中":
-            arrived = all(abs(self.engine.axes[n].position - self.engine.axes[n].trajectory.target) <= .3
-                          and not self.engine.axes[n].trajectory.segments
-                          and self.engine.axes[n].stationary(now) for n in self.nodes)
-            self.arrived_at = (self.arrived_at if self.arrived_at is not None else now) if arrived else None
-            if self.arrived_at is not None and now - self.arrived_at >= .2:
-                self.state = "归位保持（仍有力矩）"
-            elif now > self.deadline:
-                raise TimeoutError("视觉归位实测到位超时")
-        if self.state == "归位保持（仍有力矩）" and stable:
             self.state, self.lost_at = "跟随", None
-            self.targets(self.latest_targets)
+            self.engine.log("同一视觉身份新鲜采集已稳定，从保持姿态自动续跟；未重发START或重新对齐")
 
     def snapshot(self):
         return {"generation": self.generation, "source": self.source, "nodes": self.nodes,

@@ -879,7 +879,7 @@ public partial class MainViewModel
             if (Dispatcher.UIThread.CheckAccess()) RenewOpenedStreamLease();
             else await Dispatcher.UIThread.InvokeAsync(RenewOpenedStreamLease, DispatcherPriority.Input);
             if (disposed || epoch != controlEpoch || requestedSession != session || streamRevision != intentRevision) return;
-            Message = source == "vision" ? "视觉跟随已授权；归位和保持仍有力矩" : "手动实时流已开启；松开后到达最后目标并保持";
+            Message = source == "vision" ? "视觉跟随已授权；失锁原位保持，同源稳定重锁后自动续跟" : "手动实时流已开启；松开后到达最后目标并保持";
         }
         catch (Exception ex)
         {
@@ -970,8 +970,14 @@ public partial class MainViewModel
         OnPropertyChanged(nameof(VisionSubscriptionStatus));
         var sample = vision.Latest?.Current;
         var visionBlock = GetVisionStartBlockReason(sample);
-        VisionStatus = visionBlock.Length > 0 ? "视觉未就绪：" + visionBlock :
-            $"视觉已就绪 · 已订阅 · 新鲜J角 · {sample!.TargetKind} · 采集 {sample.CaptureSeq} / {sample.AgeMs:0}ms；仍须核验本轴启动条件";
+        var sameSourceWaiting = IsVision && StreamRunning && streamSource == "vision" && vision.Connected &&
+            vision.Error.Length == 0 && (sample is null || sample.IsSafe && sample.Identity == alignedIdentity) &&
+            (sample is null || !sample.HasValidData || CurrentState?.Stream.State is "采集等待保持" or "失锁保持");
+        VisionStatus = sameSourceWaiting ? sample is { HasValidData: true }
+            ? "重锁有效数据已收到 · 原位保持，等待同源稳定确认后自动续跟；无需重新对齐或启动"
+            : "视觉目标暂缺或重锁确认中 · 原位保持、保留力矩与基准；同源稳定上报后自动续跟"
+            : visionBlock.Length > 0 ? "视觉未就绪：" + visionBlock :
+                $"视觉已就绪 · 已订阅 · 新鲜J角 · {sample!.TargetKind} · 采集 {sample.CaptureSeq} / {sample.AgeMs:0}ms；仍须核验本轴启动条件";
         var preview = vision.Connected && vision.Error.Length == 0 ? sample : null;
         foreach (var axis in Axes)
             axis.UpdateVision(preview, alignedReferences.Length == 3 ? alignedReferences[axis.Node - 1] : null,
