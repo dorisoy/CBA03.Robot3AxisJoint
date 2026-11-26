@@ -42,7 +42,7 @@ public partial class MainWindow : Window
     {
         var toolbar = this.FindControl<StackPanel>("ConnectionToolbar")!;
         var actions = this.FindControl<StackPanel>("HeaderActions")!;
-        var narrow = (Bounds.Width > 0 ? Bounds.Width : Width) < 1500;
+        var narrow = (Bounds.Width > 0 ? Bounds.Width : Width) < 1560;
         Grid.SetColumn(actions, narrow ? 1 : 2);
         Grid.SetColumnSpan(actions, narrow ? 2 : 1);
         Grid.SetRow(toolbar, narrow ? 1 : 0);

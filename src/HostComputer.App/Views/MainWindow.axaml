@@ -106,6 +106,19 @@
             <Setter Property="FontSize" Value="13" />
             <Setter Property="MinHeight" Value="32" />
         </Style>
+        <Style Selector="StackPanel#ConnectionToolbar Button.connectionIcon">
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="6,6" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Button.connectionIcon icons|SymbolIcon">
+            <Setter Property="FontSize" Value="18" />
+            <Setter Property="Width" Value="18" />
+            <Setter Property="Height" Value="18" />
+            <Setter Property="IsHitTestVisible" Value="False" />
+        </Style>
         <Style Selector="Button.axisRound">
             <Setter Property="Width" Value="50" />
             <Setter Property="Height" Value="50" />
@@ -150,8 +163,24 @@
                         HorizontalAlignment="Left">
                 <ComboBox ItemsSource="{Binding Ports}" SelectedItem="{Binding SelectedPort}" IsEnabled="{Binding CanChangeConnection}" Width="220" PlaceholderText="自动扫描 / 选择端口" ToolTip.Tip="{Binding SelectedPort.Evidence}" />
                 <Button Content="刷新端口" Command="{Binding RefreshPortsCommand}" />
-                <Button Content="连接电机" Command="{Binding ConnectCommand}" Classes="primary" ToolTip.Tip="Classic CAN 1 Mbit/s；自动识别 ID1/2/3 在线节点，单台即可；连接不自动启动" />
-                <Button Content="断开 / 取消" Command="{Binding DisconnectCommand}" />
+                <Button x:Name="ConnectMotorButton" Command="{Binding ConnectCommand}" Classes="primary connectionIcon"
+                        AutomationProperties.Name="连接电机"
+                        AutomationProperties.HelpText="连接电机：Classic CAN 1 Mbit/s；自动识别 ID1/2/3 在线节点，单台即可；连接不自动启动"
+                        ToolTip.Tip="连接电机：Classic CAN 1 Mbit/s；自动识别 ID1/2/3 在线节点，单台即可；连接不自动启动">
+                    <StackPanel Orientation="Horizontal" Spacing="4" IsHitTestVisible="False">
+                        <icons:SymbolIcon Symbol="PlugConnected" VerticalAlignment="Center" />
+                        <TextBlock Text="连接电机" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="DisconnectMotorButton" Command="{Binding DisconnectCommand}" Classes="connectionIcon"
+                        AutomationProperties.Name="断开电机 / 取消"
+                        AutomationProperties.HelpText="断开电机；连接或启动进行中可取消，不自动启动电机。"
+                        ToolTip.Tip="断开电机；连接或启动进行中可取消，不自动启动电机。">
+                    <StackPanel Orientation="Horizontal" Spacing="4" IsHitTestVisible="False">
+                        <icons:SymbolIcon Symbol="PlugDisconnected" VerticalAlignment="Center" />
+                        <TextBlock Text="断开 / 取消" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
             </StackPanel>
             <StackPanel
                 x:Name="HeaderActions"
