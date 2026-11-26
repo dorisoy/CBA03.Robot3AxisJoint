@@ -21,7 +21,51 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
     private sealed record LeaseRequest(BridgeState State, long Revision, long Started, Task<JsonElement?> Reply);
     private LeaseRequest? pendingLease;
     private long leaseSubmitted, leaseCompleted;
-    private readonly Queue<JsonElement> uiLeaseHistory = new();
+    private sealed class UiLeaseTick
+    {
+        public DateTimeOffset ObservedAt { get; init; } = DateTimeOffset.UtcNow;
+        public string SessionId { get; init; } = "";
+        public long Revision { get; init; }
+        public long IntentRevision { get; init; }
+        public double StateTime { get; init; }
+        public bool Active { get; init; }
+        public bool Fresh { get; init; }
+        public double StateAgeMs { get; init; }
+        public string Stage { get; set; } = "安全核验";
+        public string LeaseDecision { get; set; } = "尚未核验";
+        public long LeaseSubmitted { get; set; }
+        public long LeaseCompleted { get; set; }
+        public long? PendingRevision { get; set; }
+        public bool? ReplyCompleted { get; set; }
+        public long AcknowledgedStreamRevision { get; init; }
+        public bool StreamLeaseHandoffPending { get; init; }
+        public long AcknowledgedTargetRevision { get; init; }
+        public bool TargetLeaseHandoffPending { get; init; }
+        public double? LeaseAgeMs { get; init; }
+        public long LeaseCount { get; init; }
+        public long LastLeaseRevision { get; init; }
+        public double UiTickIntervalMs { get; init; }
+        public double PreviousUiTickDurationMs { get; init; }
+        public Dictionary<string, double> Stages { get; } = new();
+    }
+    private readonly Queue<UiLeaseTick> uiLeaseHistory = new();
+    private UiLeaseTick? currentUiTick;
+    private static readonly JsonElement DesktopRuntime = CaptureDesktopRuntime();
+    private string lastLeaseDecision = "未尝试";
+    private string uiStage = "空闲";
+    private long uiStageStarted;
+    private readonly Dictionary<string, double> uiStages = new();
+    private bool presentationQueued, curveDirty, logsDirty, parameterRowsDirty, protectionDirty;
+    private int presentationAxes, presentationCursor;
+    private double presentationDurationMs;
+    private string presentationStage = "空闲";
+    private JsonElement? firstPresentationFailure;
+    private readonly Queue<LogEntry> capturedLogs = new();
+    private LogEntry[]? pendingLogEntries;
+    private readonly List<string> pendingLogLines = [];
+    private int logPresentationIndex;
+    private List<ParameterRow>? pendingParameterRows;
+    private int parameterRowIndex;
     private JsonElement? firstUiProtection;
     private long nextCurveAt, nextProtectionDetailsAt;
     private const string StaleBridgeMessage = "桥接状态过期，停止续约；实机停机状态须检查。";
@@ -181,6 +225,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
     public MainViewModel(IBridgeClient bridge, IVisionClient? vision = null)
     {
         this.bridge = bridge;
+        _ = DesktopRuntime; // 在未连接的构造阶段采集加载指纹，保护/续租期间不读取文件。
         this.vision = vision ?? new VisionClient();
         Axes = [new(1, this), new(2, this), new(3, this)];
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, () => CanChangeConnection);
@@ -225,9 +270,9 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(RecoveryPending));
         OnPropertyChanged(nameof(ProtectionFirstCause)); OnPropertyChanged(nameof(ProtectionCurrentFeedback));
         OnPropertyChanged(nameof(ProtectionNextStep));
-        // 完整时序仅在展开诊断时刷新，避免每 50ms 序列化长段文本。
+        // 长诊断只在低优先级展示片段更新，安全按钮及实时禁用原因仍立即通知。
         if (ProtectionDetailsExpanded && Environment.TickCount64 >= nextProtectionDetailsAt)
-        { nextProtectionDetailsAt = Environment.TickCount64 + 200; OnPropertyChanged(nameof(ProtectionDetails)); }
+        { nextProtectionDetailsAt = Environment.TickCount64 + 200; protectionDirty = true; }
         OnPropertyChanged(nameof(ConnectionSummary));
         OnPropertyChanged(nameof(PortStatus));
         OnPropertyChanged(nameof(SelectedNodeConnected));
@@ -235,8 +280,10 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         EnableAllCommand?.NotifyCanExecuteChanged(); ExecuteAllCommand?.NotifyCanExecuteChanged();
         PauseCommand?.NotifyCanExecuteChanged(); StopCommand?.NotifyCanExecuteChanged(); EstopCommand?.NotifyCanExecuteChanged();
         RefreshPortsCommand?.NotifyCanExecuteChanged(); RefreshParametersCommand?.NotifyCanExecuteChanged();
-        foreach (var a in Axes) a.Refresh();
+        foreach (var a in Axes) a.Refresh(includeDiagnostics: false);
         RefreshControlCommands();
+        presentationAxes |= 7;
+        QueuePresentation();
     }
 
     /// <summary>
@@ -244,14 +291,20 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
     /// </summary>
     public void UiTick()
     {
+        Dispatcher.UIThread.VerifyAccess();
+        if (disposed) return;
         var started = Stopwatch.GetTimestamp();
         uiTickIntervalMs = lastUiTickStamp == 0 ? 0 : Stopwatch.GetElapsedTime(lastUiTickStamp, started).TotalMilliseconds;
-        lastUiTickStamp = started;
+        lastUiTickStamp = uiStageStarted = started;
+        uiStage = "快照消费";
+        uiStages.Clear(); currentUiTick = null;
         try { UpdateUi(); }
         finally
         {
+            SetUiStage("完成");
             uiTickDurationMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             maxUiTickDurationMs = Math.Max(maxUiTickDurationMs, uiTickDurationMs);
+            currentUiTick = null;
         }
     }
 
@@ -261,13 +314,15 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
             _ = RefreshPortsAsync();
         var state = bridge.Latest;
         // 只读连接事务等待自身应答确认新会话；提前到达的快照不抢占事务，也不续租。
-        if (connectionTransitionEpoch == positionStartEpoch && state is not null && state.SessionId != session) return;
+        if (connectionTransitionEpoch == positionStartEpoch && state is not null && state.SessionId != session)
+        { lastLeaseDecision = "等待只读连接应答"; return; }
         Fresh = bridge.Running && state?.Mode == "hardware" && Protocol.IsFresh(state, DateTimeOffset.UtcNow);
         if (state == null)
         {
+            lastLeaseDecision = "后台快照缺失";
             Message = bridge.Error.Length > 0 ? bridge.Error : Message;
             ObserveMotorSafety(null);
-            foreach (var axis in Axes) axis.Update(axis.State, false);
+            foreach (var axis in Axes) axis.Update(axis.State, false, deferPresentation: true);
             ControlTick();
             RefreshCommands();
             return;
@@ -288,9 +343,25 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
             unownedStopRevision = -1;
             Curve.Clear(); parameterSnapshot = null;
             authorizationValid = true;
-            RefreshParameterRows();
+            RefreshParameterRows(deferred: true);
         }
         intentRevision = Math.Max(intentRevision, state.Revision);
+        // 先记录本次快照，再核验安全；停机冻结不再遗漏触发故障的这一轮 UI。
+        currentUiTick = new UiLeaseTick
+        {
+            SessionId = state.SessionId, Revision = state.Revision, IntentRevision = intentRevision,
+            StateTime = state.Time, Active = state.Active, Fresh = StateFreshNow,
+            StateAgeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - state.Time * 1000,
+            LeaseSubmitted = leaseSubmitted, LeaseCompleted = leaseCompleted,
+            PendingRevision = pendingLease?.Revision, ReplyCompleted = pendingLease?.Reply.IsCompleted,
+            AcknowledgedStreamRevision = acknowledgedStreamRevision, StreamLeaseHandoffPending = streamLeaseHandoffPending,
+            AcknowledgedTargetRevision = acknowledgedTargetRevision, TargetLeaseHandoffPending = targetLeaseHandoffPending,
+            LeaseAgeMs = state.LeaseAgeMs, LeaseCount = state.LeaseCount, LastLeaseRevision = state.LastLeaseRevision,
+            UiTickIntervalMs = uiTickIntervalMs, PreviousUiTickDurationMs = uiTickDurationMs
+        };
+        uiLeaseHistory.Enqueue(currentUiTick);
+        while (uiLeaseHistory.Count > 16) uiLeaseHistory.Dequeue();
+        SetUiStage("安全核验");
         ObserveLocalStops(state);
         Connected = state.Connected;
         Active = state.Active;
@@ -301,36 +372,13 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         // 瞬断后已收到新预览，也须在本次续约之前撤销旧视觉流。
         HandleVisionInterruption();
         // 先续约，再处理曲线、日志、参数表及界面通知；续约仍只来自活着的 UI。
-        var leaseDecision = disposed ? "窗口已关闭" : !StateFreshNow ? "UI 快照过期" : !Connected ? "未连接" :
-            !authorizationValid ? "授权已撤销" : state.Fault.Length > 0 ? "故障锁存" :
-            UiLeaseRevision(state) is null ? "等待意图版本反馈" : pendingLease is not null ? "等待租约应答" :
-            "UI 提交续约";
-        if (leaseDecision == "UI 提交续约") _ = LeaseAsync(state);
-        uiLeaseHistory.Enqueue(JsonSerializer.SerializeToElement(new
-        {
-            observedAt = DateTimeOffset.UtcNow,
-            state.SessionId,
-            state.Revision,
-            intentRevision,
-            state.Active,
-            fresh = StateFreshNow,
-            leaseDecision,
-            leaseSubmitted,
-            leaseCompleted,
-            pendingRevision = pendingLease?.Revision,
-            replyCompleted = pendingLease?.Reply.IsCompleted,
-            acknowledgedStreamRevision,
-            streamLeaseHandoffPending,
-            acknowledgedTargetRevision,
-            targetLeaseHandoffPending,
-            state.LeaseAgeMs,
-            state.LeaseCount,
-            state.LastLeaseRevision,
-            stateAgeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - state.Time * 1000,
-            uiTickIntervalMs,
-            previousUiTickDurationMs = uiTickDurationMs
-        }, Protocol.Json));
-        while (uiLeaseHistory.Count > 16) uiLeaseHistory.Dequeue();
+        SetUiStage("续租提交");
+        _ = LeaseAsync(state);
+        currentUiTick.LeaseSubmitted = leaseSubmitted;
+        currentUiTick.LeaseCompleted = leaseCompleted;
+        currentUiTick.PendingRevision = pendingLease?.Revision;
+        currentUiTick.ReplyCompleted = pendingLease?.Reply.IsCompleted;
+        SetUiStage("轴状态与目标");
         if (firstUiProtection is null && state.Fault.Length > 0)
             firstUiProtection = JsonSerializer.SerializeToElement(new
             {
@@ -363,9 +411,11 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                 Connected ? "桥接状态已恢复；运动须按本轴就绪提示显式操作。" : "桥接状态已恢复；当前未连接电机。";
         if (motorProtectionReason.Length > 0) Message =
             (Fresh && motorProtectionReason == "受控会话失联或 UI 反馈过期" ? "桥接状态已恢复，但会话授权仍失效；" : "") + ProtectionMessage;
-        for (var i = 0; i < Math.Min(3, state.Axes.Length); i++) Axes[i].Update(state.Axes[i], Fresh, refreshCommands: false);
+        for (var i = 0; i < Math.Min(3, state.Axes.Length); i++)
+            Axes[i].Update(state.Axes[i], Fresh, refreshCommands: false, deferPresentation: true);
         axisSession = session;
         ControlTick();
+        SetUiStage("原始曲线与日志收集");
         if (state.Time != lastTime)
         {
             lastTime = state.Time;
@@ -374,25 +424,125 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                 var iq = a.Samples.TryGetValue("current", out var sample) && sample.Valid ? sample.Value : null;
                 Curve.Add(new(state.Time, state.Mode, a.Node, Fresh ? a.Target : null, Fresh ? a.Position : null, Fresh ? a.Velocity : null, Fresh ? iq : null));
             }
-            // 仅展示按 10Hz 重绘；安全消费、续约、20Hz 控制及原始曲线采样不降频。
+            // 仍逐快照采样；重绘及日志格式化只排一个可合并的低优先级展示片段。
             if (!CurvePaused && Environment.TickCount64 >= nextCurveAt)
-            { nextCurveAt = Environment.TickCount64 + 100; CurveChanged?.Invoke(); }
-            var previousLog = lastLog;
-            foreach (var l in state.Logs.Where(l => l.Id > lastLog))
+            { nextCurveAt = Environment.TickCount64 + 100; curveDirty = true; }
+            foreach (var l in state.Logs)
             {
-                logLines.Add($"{DateTimeOffset.FromUnixTimeMilliseconds((long)(l.Time * 1000)).ToLocalTime():HH:mm:ss.fff}  {(l.Node > 0 ? "ID" + l.Node : "系统")}  {l.Text}");
-                lastLog = l.Id;
+                if (l.Id <= lastLog) continue;
+                capturedLogs.Enqueue(l); lastLog = l.Id; logsDirty = true;
+                while (capturedLogs.Count > 200) capturedLogs.Dequeue();
             }
-            if (logLines.Count > 200) logLines.RemoveRange(0, logLines.Count - 200);
-            if (lastLog != previousLog) Logs = string.Join('\n', logLines.AsEnumerable().Reverse());
         }
         if (parameterSnapshot.HasValue && Environment.TickCount64 - parameterRefreshAt >= 200)
         {
             parameterRefreshAt = Environment.TickCount64;
-            RefreshParameterRows();
+            parameterRowsDirty = true;
         }
+        SetUiStage("即时按钮与禁用原因");
         RefreshCommands();
     }
+
+    private void SetUiStage(string next)
+    {
+        var now = Stopwatch.GetTimestamp();
+        var elapsed = Stopwatch.GetElapsedTime(uiStageStarted, now).TotalMilliseconds;
+        uiStages[uiStage] = elapsed;
+        if (currentUiTick is { } tick)
+        { tick.Stages[uiStage] = elapsed; tick.Stage = next; }
+        uiStage = next; uiStageStarted = now;
+    }
+
+    private bool HasPresentation => presentationAxes != 0 || curveDirty || logsDirty ||
+        pendingLogEntries is not null || parameterRowsDirty || pendingParameterRows is not null || protectionDirty;
+
+    private void QueuePresentation()
+    {
+        if (disposed || presentationQueued || !HasPresentation) return;
+        presentationQueued = true;
+        Dispatcher.UIThread.Post(PresentSlice, DispatcherPriority.Background);
+    }
+
+    private void PresentSlice()
+    {
+        Dispatcher.UIThread.VerifyAccess();
+        presentationQueued = false;
+        if (disposed) return;
+        var started = Stopwatch.GetTimestamp();
+        try
+        {
+            // 每次只做一个阶段；阶段之间让出 Dispatcher，Input 的安全消费与续约可以抢先。
+            // 轮转避免持续拖动时三轴展示反复重置而饿死日志或参数；只使用当前已消费快照。
+            for (var n = 0; n < 7; n++)
+            {
+                var stage = presentationCursor;
+                presentationCursor = (presentationCursor + 1) % 7;
+                if (stage < 3 && (presentationAxes & (1 << stage)) != 0)
+                {
+                    presentationAxes &= ~(1 << stage);
+                    presentationStage = $"ID{stage + 1} 详细展示";
+                    Axes[stage].UpdatePresentation(StateFreshNow);
+                    Axes[stage].RefreshDiagnostics();
+                    break;
+                }
+                if (stage == 3 && curveDirty)
+                { curveDirty = false; presentationStage = "曲线重绘"; if (!CurvePaused) CurveChanged?.Invoke(); break; }
+                if (stage == 4 && (logsDirty || pendingLogEntries is not null))
+                {
+                    presentationStage = "日志分批展示";
+                    if (logsDirty && pendingLogEntries is null)
+                    {
+                        logsDirty = false; pendingLogEntries = capturedLogs.ToArray();
+                        pendingLogLines.Clear(); logPresentationIndex = 0;
+                    }
+                    if (pendingLogEntries is { } entries)
+                    {
+                        var end = Math.Min(entries.Length, logPresentationIndex + 16);
+                        while (logPresentationIndex < end) pendingLogLines.Add(FormatLog(entries[logPresentationIndex++]));
+                        if (logPresentationIndex == entries.Length)
+                        {
+                            pendingLogEntries = null;
+                            logLines.Clear(); logLines.AddRange(pendingLogLines);
+                            Logs = string.Join('\n', logLines.AsEnumerable().Reverse());
+                        }
+                    }
+                    break;
+                }
+                if (stage == 5 && (parameterRowsDirty || pendingParameterRows is not null))
+                {
+                    presentationStage = "参数分批展示";
+                    if (parameterRowsDirty)
+                    { parameterRowsDirty = false; pendingParameterRows = null; PrepareParameterRows(); }
+                    else ApplyParameterRows();
+                    break;
+                }
+                if (stage == 6 && protectionDirty)
+                {
+                    protectionDirty = false; presentationStage = "保护详细展示";
+                    if (ProtectionDetailsExpanded) OnPropertyChanged(nameof(ProtectionDetails));
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            firstPresentationFailure ??= JsonSerializer.SerializeToElement(new
+            {
+                observedAt = DateTimeOffset.UtcNow, sessionId = session, stage = presentationStage,
+                errorType = ex.GetType().Name, error = ShortText(ex.Message, 512),
+                note = "展示失败诊断；不产生运动目标或后台续租，不覆盖安全首因"
+            }, Protocol.Json);
+            presentationStage += "：" + ex.GetType().Name;
+        }
+        finally
+        {
+            presentationDurationMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            QueuePresentation();
+        }
+    }
+
+    private static string FormatLog(LogEntry entry) =>
+        $"{DateTimeOffset.FromUnixTimeMilliseconds((long)(entry.Time * 1000)).ToLocalTime():HH:mm:ss.fff}  {(entry.Node > 0 ? "ID" + entry.Node : "系统")}  {entry.Text}";
 
     private long ConfirmedControlRevision(BridgeState state) => Math.Max(state.Revision, acknowledgedStreamRevision);
 
@@ -415,12 +565,12 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
     {
         // 开流/目标应答的 UI 续约交接同样不能越过连接中断屏障。
         HandleVisionInterruption();
+        // 活着的 UI 交接入口也先收割已完成的旧应答；不在后台自动生成下一次租约。
+        if (!disposed && state.SessionId == session) CompletePendingLease();
         var revision = UiLeaseRevision(state);
-        if (disposed || !StateFreshNow || !Protocol.IsFresh(state, DateTimeOffset.UtcNow) || !Connected || !authorizationValid || state.Fault.Length > 0 ||
-            state.SessionId != session || revision is null || pendingLease is not null ||
-            bridge.Latest is not { } latest || latest.SessionId != session || !latest.Connected || latest.Fault.Length > 0 ||
-            !Protocol.IsFresh(latest, DateTimeOffset.UtcNow) ||
-            latest.Axes.Any(a => a.Enabled && AxisViewModel.MotorSafetyIssue(a, true).Length > 0)) return;
+        lastLeaseDecision = LeaseBlockReason(state);
+        if (currentUiTick is { } tick && tick.SessionId == state.SessionId) tick.LeaseDecision = lastLeaseDecision;
+        if (lastLeaseDecision != "UI 提交续约" || revision is null) return;
         var started = Stopwatch.GetTimestamp();
         Task<JsonElement?> reply;
         try { reply = bridge.SendAsync("lease", state.SessionId, revision.Value, timeoutMs: 150); }
@@ -433,6 +583,26 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         try { await reply; }
         catch (Exception) { /* 由 UI 收割结果，旧会话失败也必须被观察。 */ }
         finally { CompleteLease(request); }
+    }
+
+    private string LeaseBlockReason(BridgeState state)
+    {
+        if (disposed) return "窗口已关闭";
+        if (state.SessionId != session) return "续租快照会话不符";
+        if (!StateFreshNow) return "UI 快照过期";
+        if (!Protocol.IsFresh(state, DateTimeOffset.UtcNow)) return "续租输入快照过期";
+        if (!Connected) return "未连接";
+        if (!authorizationValid) return "授权已撤销";
+        if (state.Fault.Length > 0) return "故障锁存";
+        if (UiLeaseRevision(state) is null) return "等待意图版本反馈";
+        if (pendingLease is not null) return "等待租约应答";
+        if (bridge.Latest is not { } latest) return "后台快照缺失";
+        if (latest.SessionId != session) return "后台快照会话不符";
+        if (!latest.Connected) return "后台连接已断开";
+        if (latest.Fault.Length > 0) return "后台故障锁存";
+        if (!Protocol.IsFresh(latest, DateTimeOffset.UtcNow)) return "后台快照过期";
+        if (latest.Axes.Any(a => a.Enabled && AxisViewModel.MotorSafetyIssue(a, true).Length > 0)) return "后台受控轴反馈异常";
+        return "UI 提交续约";
     }
 
     private void CompletePendingLease()
@@ -510,9 +680,15 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         firstPositionStartFailure = null;
         firstStreamSampleFailure = null;
         firstUiProtection = null;
-        uiLeaseHistory.Clear();
-        leaseSubmitted = leaseCompleted = 0;
+        uiLeaseHistory.Clear(); currentUiTick = null;
+        leaseSubmitted = leaseCompleted = 0; lastLeaseDecision = "新会话待核验";
+        firstPresentationFailure = null;
         nextCurveAt = 0;
+        capturedLogs.Clear(); logLines.Clear(); pendingLogEntries = null; pendingLogLines.Clear();
+        lastLog = 0; lastTime = 0; Logs = "";
+        curveDirty = logsDirty = protectionDirty = false;
+        parameterRowsDirty = true; pendingParameterRows = null; parameterRowIndex = 0;
+        presentationAxes = 7;
         recoveryRevision = -1;
         lastRecoveryNotice = "";
         motorProtectionReason = motorProtectionSummary = motorStopResult = "";
@@ -897,7 +1073,29 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
     /// 刷新参数行集合以反映当前配置文件和参数快照的状态。此方法会清空现有参数列表，并根据最新的参考配置和快照数据重新填充参数行。适用于参数分组筛选和在线/离线状态下的参数同步。
     /// </summary>
     /// <remarks>如果参数快照不可用或参考配置文件读取失败，参数列表将被清空并显示错误信息。方法会根据当前连接状态和参数分组动态调整参数来源和显示内容。</remarks>
-    private void RefreshParameterRows()
+    private void RefreshParameterRows(bool deferred = false)
+    {
+        parameterRowsDirty = true; pendingParameterRows = null;
+        if (deferred || Active || CurrentState?.Active == true || StreamRunning) { QueuePresentation(); return; }
+        // 未运行时的显式读取保留即刻结果；运行中的集合通知每片段最多16行。
+        parameterRowsDirty = false;
+        PrepareParameterRows();
+        while (pendingParameterRows is not null && !parameterRowsDirty) ApplyParameterRows();
+        QueuePresentation();
+    }
+
+    private string ParameterReading(string name, string value)
+    {
+        if (parameterSnapshot?.TryGetProperty("readings", out var readings) == true && readings.TryGetProperty(name, out var r))
+        {
+            var expired = name.StartsWith("telemetry.", StringComparison.Ordinal) &&
+                (!r.TryGetProperty("acquiredAt", out var at) || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - at.GetDouble() > .2);
+            if (!SelectedNodeConnected || !StateFreshNow || !r.GetProperty("valid").GetBoolean() || expired) return "过期 / 未知";
+        }
+        return parameterSnapshot?.GetProperty("source").GetString() == "hardware" ? value : "—";
+    }
+
+    private void PrepareParameterRows()
     {
         try
         {
@@ -910,16 +1108,6 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                     if (ep.TryGetProperty("unit", out var unit)) units[ep.GetProperty("name").GetString()!] = unit.GetString() ?? "固件原值";
             var values = parameterSnapshot?.GetProperty("values");
             var source = !parameterSnapshot.HasValue ? "未读取" : !SelectedNodeConnected ? "历史缓存（未连接）" : parameterSnapshot.Value.GetProperty("source").GetString() == "hardware" ? "实机连接缓存" : "来源不兼容";
-            string Reading(string name, string value)
-            {
-                if (parameterSnapshot?.TryGetProperty("readings", out var readings) == true && readings.TryGetProperty(name, out var r))
-                {
-                    var expired = name.StartsWith("telemetry.", StringComparison.Ordinal) &&
-                        (!r.TryGetProperty("acquiredAt", out var at) || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - at.GetDouble() > .2);
-                    if (!SelectedNodeConnected || !StateFreshNow || !r.GetProperty("valid").GetBoolean() || expired) return "过期 / 未知";
-                }
-                return parameterSnapshot?.GetProperty("source").GetString() == "hardware" ? value : "—";
-            }
             string Acquisition(string name)
             {
                 if (parameterSnapshot?.TryGetProperty("readings", out var readings) == true && readings.TryGetProperty(name, out var r) &&
@@ -932,18 +1120,52 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                 var name = row.GetProperty("name").GetString()!;
                 var baseline = row.GetProperty("value").ToString();
                 var online = values.HasValue && values.Value.TryGetProperty(name, out var value) ? value.ToString() : "—";
-                next.Add(new(name, row.GetProperty("label").GetString()!, baseline, Reading(name, online), row.GetProperty("unit").GetString()!, $"{source} / {(online == "—" ? "无对应读回值" : online == baseline ? "一致" : "有差异")}" + Acquisition(name)));
+                next.Add(new(name, row.GetProperty("label").GetString()!, baseline, online, row.GetProperty("unit").GetString()!, $"{source} / {(online == "—" ? "无对应读回值" : online == baseline ? "一致" : "有差异")}" + Acquisition(name)));
             }
             if (ParameterGroup == 2 && values.HasValue)
                 foreach (var p in values.Value.EnumerateObject().Where(p => !rowNames.Contains(p.Name)))
-                    next.Add(new(p.Name, p.Name, "—", Reading(p.Name, p.Value.ToString()), units.GetValueOrDefault(p.Name, "固件原值"), source + " / 只读" + Acquisition(p.Name)));
-            for (var i = 0; i < next.Count; i++)
-                if (i >= Parameters.Count) Parameters.Add(next[i]);
-                else if (Parameters[i] != next[i]) Parameters[i] = next[i];
-            while (Parameters.Count > next.Count) Parameters.RemoveAt(Parameters.Count - 1);
+                    next.Add(new(p.Name, p.Name, "—", p.Value.ToString(), units.GetValueOrDefault(p.Name, "固件原值"), source + " / 只读" + Acquisition(p.Name)));
+            pendingParameterRows = next; parameterRowIndex = 0;
         }
         catch (Exception ex) { Message = "参考配置读取失败：" + ex.Message; }
     }
+    private void ApplyParameterRows()
+    {
+        if (pendingParameterRows is not { } rows) return;
+        for (var n = 0; n < 16; n++)
+        {
+            if (parameterRowsDirty || !ReferenceEquals(pendingParameterRows, rows)) return;
+            if (parameterRowIndex < rows.Count)
+            {
+                var i = parameterRowIndex++;
+                // 等待其它展示片段期间采集可能过期；集合提交时再核验，不能沿用准备时的新鲜判断。
+                var row = rows[i] with { Online = ParameterReading(rows[i].Name, rows[i].Online) };
+                if (i >= Parameters.Count) Parameters.Add(row);
+                else if (Parameters[i] != row) Parameters[i] = row;
+            }
+            else if (Parameters.Count > rows.Count) Parameters.RemoveAt(Parameters.Count - 1);
+            else { pendingParameterRows = null; return; }
+        }
+        if (parameterRowIndex == rows.Count && Parameters.Count == rows.Count) pendingParameterRows = null;
+    }
+
+    private static JsonElement CaptureDesktopRuntime()
+    {
+        var assembly = typeof(MainViewModel).Assembly;
+        string? hash = null;
+        try { if (File.Exists(assembly.Location)) hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(assembly.Location))); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return JsonSerializer.SerializeToElement(new
+        {
+            controlRevision = "ui-lease-sliced-presentation-v1",
+            assemblyPath = assembly.Location, moduleVersionId = assembly.ManifestModule.ModuleVersionId.ToString(),
+            assemblyVersion = assembly.GetName().Version?.ToString(), sha256 = hash,
+            fingerprintSource = "首个桌面视图构造时磁盘指纹；MVID 来自加载程序集，不是硬件固件版本",
+            processPath = Environment.ProcessPath, baseDirectory = AppContext.BaseDirectory
+        }, Protocol.Json);
+    }
+
     public string ExportParameters()
     {
         var captured = DateTimeOffset.Now;
@@ -968,6 +1190,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
             snapshot = parameterSnapshot,
             diagnostics = new
             {
+                runtime = new { desktop = DesktopRuntime, bridge = bridge.RuntimeIdentity },
                 stateTime = state?.Time,
                 fresh = freshAtCapture,
                 stateSource = "UI 已消费快照；导出不续租、不发令，后台最新快照单列",
@@ -1054,6 +1277,9 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                     uiTickIntervalMs,
                     uiTickDurationMs,
                     maxUiTickDurationMs,
+                    uiStage, uiStageAgeMs = uiStageStarted == 0 ? (double?)null : Stopwatch.GetElapsedTime(uiStageStarted).TotalMilliseconds,
+                    uiStages = new Dictionary<string, double>(uiStages), lastLeaseDecision,
+                    presentationQueued, presentationStage, presentationDurationMs, firstPresentationFailure,
                     firstRequestTimeout = bridge.FirstTimeout,
                     recentTransport = SessionTransport(),
                     firstLeaseFailure,
@@ -1070,7 +1296,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                 }
             },
             units = "描述符固件单位；axis 是 stateTime 时的历史快照，只有 axisUsable=true 才是有效运动反馈；角度 °、速度 °/s",
-            logs = logLines.ToArray()
+            logs = capturedLogs.Select(FormatLog).ToArray()
         }, new JsonSerializerOptions(Protocol.Json) { WriteIndented = true });
     }
     public async ValueTask DisposeAsync()

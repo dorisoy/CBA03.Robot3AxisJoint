@@ -107,16 +107,22 @@
             <Setter Property="MinHeight" Value="32" />
         </Style>
         <Style Selector="Button.axisRound">
-            <Setter Property="Width" Value="64" />
-            <Setter Property="Height" Value="64" />
-            <Setter Property="MinWidth" Value="64" />
-            <Setter Property="MinHeight" Value="64" />
+            <Setter Property="Width" Value="50" />
+            <Setter Property="Height" Value="50" />
+            <Setter Property="MinWidth" Value="50" />
+            <Setter Property="MinHeight" Value="50" />
             <Setter Property="CornerRadius" Value="32" />
             <Setter Property="Padding" Value="0" />
             <Setter Property="HorizontalAlignment" Value="Center" />
             <Setter Property="HorizontalContentAlignment" Value="Center" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
             <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="Button.axisRound icons|SymbolIcon">
+            <Setter Property="FontSize" Value="25" />
+            <Setter Property="Width" Value="25" />
+            <Setter Property="Height" Value="25" />
+            <Setter Property="IsHitTestVisible" Value="False" />
         </Style>
         <Style Selector="Button.axisRound.abnormal">
             <Setter Property="BorderBrush" Value="#FFBD69" />
@@ -246,14 +252,32 @@
                             <DataTemplate x:DataType="vm:AxisViewModel">
                                 <Border Classes="panel" Margin="0,0,8,0" Padding="12">
                                     <StackPanel Spacing="5">
-                                        <Button Command="{Binding SelectCommand}" HorizontalAlignment="Stretch" Background="Transparent" Padding="0">
-                                            <TextBlock Text="{Binding Title}" Foreground="{Binding Accent}" FontSize="15" FontWeight="SemiBold" />
-                                        </Button>
-                                        <TextBlock Text="{Binding Status}" FontSize="12" TextTrimming="CharacterEllipsis" />
+                                        
                                         <Grid ColumnDefinitions="*,*" ColumnSpacing="6">
-                                            <Button Content="{Binding StartButtonText}" Command="{Binding StartPositionCommand}" Classes="primary axisRound" ToolTip.Tip="{Binding PositionControlHint}" />
-                                            <Button Grid.Column="1" Content="{Binding StopButtonText}" Command="{Binding StopMotorCommand}" Classes="danger axisRound" Classes.abnormal="{Binding IsAbnormal}" ToolTip.Tip="{Binding StopMotorHint}" />
+                                            <Button Command="{Binding SelectCommand}" HorizontalAlignment="Stretch" Background="Transparent" Padding="0">
+                                                <TextBlock Text="{Binding Title}" Foreground="{Binding Accent}" FontSize="15" FontWeight="SemiBold" />
+                                            </Button>
+                                            <TextBlock  Grid.Column="1"
+                                                        Text="{Binding Status}" 
+                                                        FontSize="12" 
+                                                        TextTrimming="CharacterEllipsis" 
+                                                        HorizontalAlignment="Right"/>
                                         </Grid>
+
+                                     
+                                        <Grid ColumnDefinitions="*,*" ColumnSpacing="0">
+                                            <Button Command="{Binding StartPositionCommand}" Classes="primary axisRound"
+                                                    AutomationProperties.Name="{Binding StartButtonText}" AutomationProperties.HelpText="{Binding PositionControlHint}"
+                                                    ToolTip.Tip="{Binding PositionControlHint}">
+                                                <icons:SymbolIcon Symbol="{Binding StartButtonIcon}" />
+                                            </Button>
+                                            <Button Grid.Column="1" Command="{Binding StopMotorCommand}" Classes="danger axisRound" Classes.abnormal="{Binding IsAbnormal}"
+                                                    AutomationProperties.Name="{Binding StopButtonText}" AutomationProperties.HelpText="{Binding StopMotorHint}"
+                                                    ToolTip.Tip="{Binding StopMotorHint}">
+                                                <icons:SymbolIcon Symbol="{Binding StopButtonIcon}" />
+                                            </Button>
+                                        </Grid>
+
                                         <!-- <TextBlock Text="{Binding PositionControlHint}" FontSize="11" TextWrapping="Wrap" Foreground="#F3BD69" />-->
                                         <Border IsVisible="{Binding ShowUnownedStop}" BorderBrush="#806740" BorderThickness="1" CornerRadius="5" Padding="8">
                                             <StackPanel Spacing="5">
@@ -266,13 +290,24 @@
                                                 <TextBlock Text="{Binding UnownedStopBlockReason}" TextWrapping="Wrap" FontSize="11" Foreground="#F3BD69" />
                                             </StackPanel>
                                         </Border>
-                                        <plot:AxisGauge Actual="{Binding Actual}" Target="{Binding Target}" Preview="{Binding VisionPreview}" DisplayText="{Binding PositionText}" Accent="{Binding Accent}" Minimum="{Binding DisplayHardLow}" Maximum="{Binding DisplayHardHigh}" HorizontalAlignment="Stretch" />
+                                        <plot:AxisGauge Actual="{Binding Actual}" 
+                                                        Target="{Binding Target}" 
+                                                        Preview="{Binding VisionPreview}" 
+                                                        DisplayText="{Binding PositionText}" 
+                                                        Accent="{Binding Accent}" 
+                                                        Minimum="{Binding DisplayHardLow}" 
+                                                        Maximum="{Binding DisplayHardHigh}" 
+                                                        HorizontalAlignment="Stretch" />
+
                                         <TextBlock Text="{Binding VisionText}" Foreground="#70E4B5" FontSize="11" TextWrapping="Wrap" />
                                         <TextBlock Text="{Binding Detail}" Classes="muted" LineHeight="17" FontSize="11" TextWrapping="Wrap" />
+
                                         <Border Height="1" Background="#2A3647" Margin="0,3" />
-                                        <Grid ColumnDefinitions="*,Auto">
+
+                                <!--        <Grid ColumnDefinitions="*,Auto">
                                             <TextBlock Grid.Column="1" Text="{Binding Pending, StringFormat=' {0:0.00}°'}" Foreground="{Binding Accent}" FontWeight="SemiBold" />
-                                        </Grid>
+                                        </Grid>-->
+
                                         <plot:UserTargetSlider Theme="{StaticResource PotentiometerSlider}" Foreground="{Binding Accent}"
                                                                Value="{Binding Pending, Mode=OneWay}" Minimum="{Binding DisplayHardLow}" Maximum="{Binding DisplayHardHigh}"
                                                                TickFrequency="{Binding SliderTickFrequency}" TickPlacement="Outside" IsSnapToTickEnabled="False"
@@ -406,7 +441,7 @@
             </Border>
         </Grid>
         <Border Grid.Row="4" Background="#212B38" CornerRadius="6" Padding="10,6" Margin="0,8,0,0">
-            <TextBlock x:Name="MessageSummary" Text="{Binding Message}" TextTrimming="CharacterEllipsis" Foreground="#F3BD69" />
+            <TextBlock x:Name="MessageSummary" Text="{Binding Message}"  FontSize="10" TextTrimming="CharacterEllipsis" Foreground="#F3BD69" />
         </Border>
     </Grid>
 </Window>

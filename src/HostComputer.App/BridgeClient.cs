@@ -74,6 +74,7 @@ public interface IBridgeClient : IAsyncDisposable
     string Error { get; }
     BridgeRequestTimeout? FirstTimeout => null;
     IReadOnlyList<BridgeTransportEvent> RecentTransport => [];
+    JsonElement? RuntimeIdentity => null;
     void Start();
     Task<JsonElement?> SendAsync(string action, string session, long revision, object? data = null, int timeoutMs = 1000);
 }
@@ -121,6 +122,7 @@ public sealed class BridgeClient : IBridgeClient
     private BridgeState? latest;
     private string error = "";
     public BridgeState? Latest => Volatile.Read(ref latest);
+    public JsonElement? RuntimeIdentity { get; private set; }
     public string Error => Volatile.Read(ref error);
     public bool Running => process is { HasExited: false } && !lifetime.IsCancellationRequested;
 
@@ -150,6 +152,20 @@ public sealed class BridgeClient : IBridgeClient
         var root = FindRoot();
         var python = Environment.GetEnvironmentVariable("CBA03_PYTHON") ?? Path.Combine(root, ".venv", "Scripts", "python.exe");
         if (!File.Exists(python)) throw new FileNotFoundException("缺少独立 Python 环境；请先运行 Prepare.ps1，或设置 CBA03_PYTHON。", python);
+        // 只在子进程启动前读取文件；诊断导出和运动期不重新哈希，也不枚举环境变量。
+        var files = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in new[] { "server.py", "engine.py", "control_stream.py", "protocol.py" })
+        {
+            try { files[name] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(Path.Combine(root, "bridge", name)))); }
+            catch (IOException ex) { files[name] = ex.GetType().Name; }
+            catch (UnauthorizedAccessException ex) { files[name] = ex.GetType().Name; }
+        }
+        RuntimeIdentity = JsonSerializer.SerializeToElement(new
+        {
+            capturedAt = DateTimeOffset.UtcNow, root, pythonExecutable = python,
+            entryPoint = Path.Combine(root, "bridge", "server.py"), files,
+            fingerprintSource = "子进程启动时磁盘指纹；不是硬件固件版本或当前文件重读"
+        }, Protocol.Json);
         var start = new ProcessStartInfo(python)
         {
             WorkingDirectory = root,

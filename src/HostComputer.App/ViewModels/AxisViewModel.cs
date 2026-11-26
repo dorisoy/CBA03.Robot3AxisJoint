@@ -1,6 +1,7 @@
 using Avalonia.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FluentIcons.Common;
 using HostComputer.Core;
 using System.Globalization;
 
@@ -163,6 +164,7 @@ public partial class AxisViewModel : ObservableObject
         !State.HasDriveFault && !State.Enabled && State.Gate == false && State.MotorMode == 2 &&
         State.Phase is not ("停止待确认" or "停机未确认" or "急停清除待确认" or "急停清除未确认");
     public string StartButtonText => State.Holding ? "继续" : "启动";
+    public Symbol StartButtonIcon => State.Holding ? Symbol.PlayCircle : Symbol.Play;
     public string MotorStateText => !State.Connected ? "未连接" : !owner.StateFreshNow || !State.Valid ? "状态未知" :
         State.Fault == 4 ? "急停（0x4）" : State.HasDriveFault ? "故障（非急停，不自动清除）" :
         IsIdle ? "空闲" : State.Enabled && State.Gate == true && State.MotorMode == 5 ?
@@ -273,6 +275,7 @@ public partial class AxisViewModel : ObservableObject
         MotorSafetyIssue(State, owner.StateFreshNow);
     public bool IsAbnormal => AbnormalReason.Length > 0;
     public string StopButtonText => IsAbnormal ? "异常" : "停止";
+    public Symbol StopButtonIcon => IsAbnormal ? Symbol.Warning : Symbol.Stop;
     public string StopMotorHint => IsAbnormal ? MainViewModel.ShortText(AbnormalReason) + "\n" +
         owner.CurrentAxisFeedback(State) + "\n" +
         (!owner.StateFreshNow || !State.Connected || !State.Valid ?
@@ -447,7 +450,7 @@ public partial class AxisViewModel : ObservableObject
     }
 
 
-    public void Update(AxisState state, bool fresh, bool refreshCommands = true)
+    public void Update(AxisState state, bool fresh, bool refreshCommands = true, bool deferPresentation = false)
     {
         State = state;
         if (fresh && state.Connected && state.Valid && Protocol.ValidResponse(state.Rpm, state.Acceleration) &&
@@ -475,8 +478,16 @@ public partial class AxisViewModel : ObservableObject
                     ? "门极开启 · 本会话未接管" : "已连接 · 待使能（未接管）") : state.Phase;
         if (state.Holding) phase = state.HoldState;
         Status = !state.Connected ? phase : MotorStateText + " / " + (!fresh || !state.Valid ? phase + " / 反馈过期或未知" : phase);
+        if (!deferPresentation) UpdatePresentation(fresh);
+        if (refreshCommands) Refresh();
+    }
+
+    internal void UpdatePresentation(bool fresh)
+    {
+        // 展示阶段只能读当前已消费的轴状态；绝不替换状态、续租或提交目标。
+        var state = State;
         var error = state.FollowingErrorDeg.HasValue ? $"{state.FollowingErrorDeg:0.000}° / 超过3°持续 {state.FollowingDurationMs:0}ms" : "—";
-        Detail = $"绝对 {state.Absolute:0.00}°  ·  采样对齐跟随误差（仅诊断，不自动停机） {error}\n速度 {state.Velocity:0.00}°/s  /  {state.Velocity / 6:0.000} RPM\n帧上限 {state.Rpm:0} RPM = {state.Rpm * 6:0}°/s  ·  {state.Amps:0.0} A\n加减速度 {state.Acceleration:G}°/s²\n参考 {(state.Reference.HasValue ? state.Reference.Value.ToString("0.00") + "°" : "未记录")}  ·  年龄 {state.AgeMs:0} ms";
+        Detail = $"绝对 {state.Absolute:0.00}°  ·  采样对齐跟随误差 {error}\n速度 {state.Velocity:0.00}°/s  /  {state.Velocity / 6:0.000} RPM\n帧上限 {state.Rpm:0} RPM = {state.Rpm * 6:0}°/s  ·  {state.Amps:0.0} A\n加减速度 {state.Acceleration:G}°/s²\n参考 {(state.Reference.HasValue ? state.Reference.Value.ToString("0.00") + "°" : "未记录")}  ·  年龄 {state.AgeMs:0} ms";
         if (!fresh || !state.Valid)
             Detail = $"绝对位置 / 速度 / 误差：—（过期）\n帧上限 {state.Rpm:0} RPM · {state.Amps:0.0} A\n参考 {(state.Reference.HasValue ? state.Reference.Value.ToString("0.00") + "°" : "未记录")}\n反馈年龄 {state.AgeMs:0} ms";
         if (!state.Connected)
@@ -487,7 +498,6 @@ public partial class AxisViewModel : ObservableObject
             Detail = "正在等待位置、状态和门极反馈\n反馈有效后才允许记录参考与使能";
         string SampleText(string key, string unit) => fresh && state.Connected && state.Samples.TryGetValue(key, out var s) && s.Valid ? $"{s.Value:0.00}{unit}" : "—";
         Telemetry = $"Iq {SampleText("current", "A")}  ·  母线 {SampleText("voltage", "V")}\n电机 {SampleText("motorTemp", "°C")}  ·  MOS {SampleText("driverTemp", "°C")}\n母线电流（估算）{SampleText("busCurrentEstimate", "A")}\n力矩（估算）{SampleText("torqueEstimate", "N·m")}\n功率（估算）{SampleText("powerEstimate", "W")}";
-        if (refreshCommands) Refresh();
     }
 
 
@@ -497,9 +507,12 @@ public partial class AxisViewModel : ObservableObject
         OnPropertyChanged(nameof(VisionStartHint));
     }
 
-    public void Refresh()
+    internal void RefreshDiagnostics() => OnPropertyChanged(nameof(ControlDiagnostics));
+
+    public void Refresh(bool includeDiagnostics = true)
     {
         OnPropertyChanged(nameof(IsIdle)); OnPropertyChanged(nameof(MotorStateText)); OnPropertyChanged(nameof(StartButtonText));
+        OnPropertyChanged(nameof(StartButtonIcon));
         RefreshResponse();
         OnPropertyChanged(nameof(CommandMinimum)); OnPropertyChanged(nameof(CommandMaximum));
         OnPropertyChanged(nameof(DisplayHardLow)); OnPropertyChanged(nameof(DisplayHardHigh));
@@ -511,6 +524,7 @@ public partial class AxisViewModel : ObservableObject
         OnPropertyChanged(nameof(PositionControlHint)); StartPositionCommand.NotifyCanExecuteChanged();
         StopMotorCommand.NotifyCanExecuteChanged(); OnPropertyChanged(nameof(StopMotorHint));
         OnPropertyChanged(nameof(AbnormalReason)); OnPropertyChanged(nameof(IsAbnormal)); OnPropertyChanged(nameof(StopButtonText));
+        OnPropertyChanged(nameof(StopButtonIcon));
         OnPropertyChanged(nameof(CanStopUnowned)); OnPropertyChanged(nameof(CanAcknowledgeUnownedStop));
         OnPropertyChanged(nameof(UnownedStopBlockReason)); OnPropertyChanged(nameof(ShowUnownedStop));
         OnPropertyChanged(nameof(UnownedStopText)); StopUnownedCommand.NotifyCanExecuteChanged();
@@ -519,7 +533,8 @@ public partial class AxisViewModel : ObservableObject
         OnPropertyChanged(nameof(TransmissionStatus)); PrepareCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(CanReference)); OnPropertyChanged(nameof(Readiness)); OnPropertyChanged(nameof(CanConfirmMapping));
         OnPropertyChanged(nameof(ReferenceBlockReason)); OnPropertyChanged(nameof(EnableBlockReason));
-        OnPropertyChanged(nameof(ExecuteBlockReason)); OnPropertyChanged(nameof(ControlDiagnostics));
+        OnPropertyChanged(nameof(ExecuteBlockReason));
+        if (includeDiagnostics) RefreshDiagnostics();
         OnPropertyChanged(nameof(CanConfigure)); OnPropertyChanged(nameof(CanEnable)); OnPropertyChanged(nameof(CanExecute)); OnPropertyChanged(nameof(CanEditTarget));
         PlusCommand.NotifyCanExecuteChanged(); MinusCommand.NotifyCanExecuteChanged();
         ReferenceCommand.NotifyCanExecuteChanged(); EnableCommand.NotifyCanExecuteChanged();

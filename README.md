@@ -427,6 +427,15 @@ $VisionRoot = [System.IO.Path]::GetFullPath((Join-Path $HostRoot '..\..\..\..\Ge
 
 普通切窗/失去窗口焦点不主动暂停。若实际 UI 调度、管道、有效续租或电机反馈真的超时，仍会停机；不应为了避免误停把接收线程改成无限代续 UI 租约。
 
+### UI 安全消费与分片展示
+
+- 50ms、Input 优先级的 UI 周期仍消费快照，核验故障/会话、收割已完成租约应答并提交合法续租，再更新基本轴读数、目标、按钮和禁用原因。直接开流/目标应答交接同样先收割旧应答；后台任务完成不能自行周期续租。
+- 三轴长文本/详细诊断、曲线重绘、日志格式化、参数集合和已展开的保护详情通过单个合并调度入口，在 Background 优先级按阶段轮转；每片日志格式化/参数集合应用最多16条或行。连续日志到来不重置尚未完成的格式化批次，完成后再展示最新有界缓存。
+- 原始曲线逐新快照采样，不因展示合并丢掉已消费的采样；日志原始缓存最多200条，JSON 导出直接读取它，不等待界面日志完成。参数行提交集合时重新核验读回有效性和采集过期；换轴、换组、新会话和关闭不会复活旧展示或旧控制。
+- 先记录触发轮次，再核验安全并冻结首保护；当次阶段与累计最大 UI 耗时分开。已结束的 UI tick 记录不被后来的交接改写，展示异常另列，不覆盖电机/通信首因。
+
+分片仍在同一 UI 线程；只能让高优先级任务在片段之间先执行，不能抢占一个正在执行的同步通知、渲染或 Windows 调度停顿。真正 UI 卡死/失联仍停止续租并触发原保护；没有扩大150/200ms门限，也没有后台无条件代续租。离线请求次数与 Headless 焦点切换测试不证明实机最大续租间隙。
+
 ### Windows 管道写入与监督
 
 - Windows 唯一独立写线程同步写完整 UTF-8 JSON Lines 并 flush，不逐帧等待 ThreadPool 异步写入。入队事件立即唤醒；空闲 `WaitOne(50)` 不是固定发送延迟。仍按 urgent→lease→normal 使用原有有界队列，不增加队列容量、CAN 线程或生产 ThreadPool 配额。
@@ -488,7 +497,10 @@ JSON 导出本身不续租、不发令，按导出时的 UI 已消费快照冻�
 | `transport.authorizationValid、intentRevision、acknowledgedStreamRevision` | 授权和结构请求版本交接 |
 | `transport.firstRequestTimeout` | 进程级历史首超时，区分发送排队、管道写入和等待应答；不能替代当前 lease 首因 |
 | `transport.firstLeaseFailure.currentRequestTimeout、historicalFirstRequestTimeout` | 当次诊断异常证据与历史首超时分列；当次缺失时明确未知，不借用历史归因 |
-| `transport.firstLeaseFailure、firstUiProtection、recentUiTicks` | 首次续约失败、UI 首保护与最近时序；自动安全停机在撤权、清流和发送急停前冻结首因，`authorizationValidBeforeStop` 保留撤权前状态 |
+| `transport.firstLeaseFailure、firstUiProtection、recentUiTicks` | 首次续约失败、UI 首保护与最近16轮时序；触发轮次先入队再核验，自动安全停机在撤权、清流和发送急停前冻结首因，`authorizationValidBeforeStop` 保留撤权前状态 |
+| `transport.uiStage、uiStages、lastLeaseDecision` | 本次 UI 阶段、阶段耗时与具体续租提交/阻断原因；等待应答、版本、快照过期及后台故障分别记录 |
+| `transport.presentationQueued、presentationStage、presentationDurationMs、firstPresentationFailure` | 分片展示排队、最后片段及首展示异常；不是电机保护或实际后台续租证据 |
+| `runtime.desktop、runtime.bridge` | 桌面加载路径/MVID及构造时磁盘SHA256，bridge启动前脚本指纹；不是实体固件版本，导出不重新读取文件 |
 | `transport.recentTransport` | 当前会话最近至多16条传输时序；含队列、阶段、字节数、单调时戳和取消结果，不记录请求正文或来源凭据 |
 | `health、protectionFirstCause、protectionCurrentFeedback、protectionNextStep` | 四项独立状态及分层保护显示，未知/过期不是健康或已停机 |
 | `transport.firstUiProtection.reason、source、generation、axes` | 新增停机记录中的触发原因、当时来源/流及三轴故障、门极和新鲜度；`axes[].excludedIdleUnowned` 标明是否满足只读观察轴排除条件 |
@@ -576,9 +588,19 @@ npm.cmd --prefix $WebRoot run build
 & (Join-Path $VisionRoot '.venv\Scripts\python.exe') -X utf8 -m unittest discover -s (Join-Path $VisionRoot 'tests') -p 'test_*.py'
 ```
 
-### 本次失踪保持与稳定重锁验证
+### 本次手动拖动 UI 租约修复验证
 
-本次独立记录位于 `artifacts/verification/loss-hold/`：[Python](artifacts/verification/loss-hold/python-tests.json) 237/237、[Release 桌面全量](artifacts/verification/loss-hold/desktop-final.trx) 484/484，网页 132/132、视觉 80/80，均通过；网页构建通过。桌面全量包含三端契约与新增 14 项失踪保持专项。
+本次结果位于 `artifacts/verification/ui-lease/`：[Python](artifacts/verification/ui-lease/python-tests.json) 237/237、[Release 桌面全量](artifacts/verification/ui-lease/desktop-final.trx) 509/509、[最终专项](artifacts/verification/ui-lease/target-final.trx) 45/45，均通过。[Debug/Release win-x64 构建](artifacts/verification/ui-lease/build-Build.json) 通过，独立产物目录为 `artifacts/ui-lease-build`。源码 `Start.ps1 -CheckOnly` 通过，仅确认默认入口及依赖存在；独立构建不更新默认入口、旧发布包或已运行程序。
+
+新增25项 `UiPresentation` 专项覆盖安全消费与展示分离、原始采样/日志保留、输入在16行参数片段之间执行、采集过期重核验、连续日志不饿死、换组/轴/会话和关闭隔离、触发轮次冻结、具体续租门控、交接不改写历史及展示异常独立诊断。既有六组三轴正反向真实滑条键盘/鼠标测试叠加160项参数、200条日志与 Headless 焦点切换；全量仍包含租约/失联/故障/版本取消保护、Windows匿名管道与三端合成契约。
+
+早期 `ui-lease-before.trx` 和 `ui-lease-targeted-*.trx` 保留失败过程，最终以 `desktop-final.trx` 与 `target-final.trx` 为准。夹具修正只补齐开流前到位静止反馈、所选在线轴与独立采样时刻，没有放宽生产门控或150/200ms保护。网页/视觉全量132/80为此前失踪保持记录，本次未改这些源码或重跑其完整测试；三端契约已随桌面全量通过。
+
+当前只完成源码修复与离线验证，未 Publish/All、重启用户 EXE/现场服务、打开实体串口/相机、清错、置零、使能或试转。已确认现场原会话首因是租约218ms超限，但续租空档不能唯一归因于 UI 卡顿或视觉改动；分片不能保证 Windows 硬实时。须另行确认新版加载与现场验收，保留同会话 JSON 的 `runtime`、阶段与后端租约记录。
+
+### 此前失踪保持与稳定重锁验证
+
+该次独立记录位于 `artifacts/verification/loss-hold/`：[Python](artifacts/verification/loss-hold/python-tests.json) 237/237、[Release 桌面全量](artifacts/verification/loss-hold/desktop-final.trx) 484/484，网页 132/132、视觉 80/80，均通过；网页构建通过。桌面全量包含三端契约与新增 14 项失踪保持专项。
 
 回归覆盖三轴单独/组合与正反向、非归位姿态长期保持、重锁确认期无效发布、人脸/嘴部 IK 种子保留、采集再次停顿重置稳定累计，以及保持中真实租约超时、电机故障、断链、身份变化和人工停止仍保护。恢复前后原流代次、逐轴令牌与对齐基准不变，不重发 START/STOP/急停或清错命令；这里的故障与运动均为合成数据/内存 CAN。
 
@@ -663,7 +685,7 @@ npm.cmd --prefix $WebRoot run build
 - 真实三轴负载、机械安装、运动方向、行程裕量、限流和高速响应未由离线测试证明安全。
 - Windows 卡顿、系统睡眠、适配器排队及真实 CAN 干扰仍可能触发保护；切窗正常不等于允许真实失联。
 - 大多圈坐标精度、整数静止证据和实际固件能力需以当轴 JSON 与现场读回核对，不能自动置零规避。
-- 用户已现场确认手动位置控制反复停止问题解决；这一结论只适用于手动场景，不代替 AI 视觉验收。
+- 此前用户曾确认手动位置控制反复停止问题解决，但随后拖动再次复发。原会话 `CBA03-20261126-111745.json` 的首保护是 UI 租约218ms超过200ms，当时为手动来源且视觉未连接；不能据此认定 AI 失踪保持是直接原因，也不能仅凭累计最大 UI 耗时唯一归因。分片展示修复须对照实际加载版本与新会话现场复验。
 - 此前已离线复现并修复未接管关闭输出轴故障误升级组级锁存，以及 ThreadPool 压力下 Windows 管道交付阻塞的路径；本轮自动订阅保留这些回归与生产写泵。这些不是现场唯一归因：原会话桌面 JSON、网页诊断及实际加载版本仍需对照，后续 Fault=0x4 不能倒推最初原因。
 - 同源失踪保持、稳定重锁自动续跟与再次采集停顿已具备软件回归；人工重新锁定/校准仍撤旧授权，旧服务/旧 EXE 混用或实机异常须保留当次证据复验。
 - 速度/力矩来源、远程控制、通用参数编辑和固件升级不在当前已实现功能范围。
