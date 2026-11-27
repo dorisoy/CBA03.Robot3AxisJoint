@@ -371,7 +371,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         ObserveMotorSafety(state);
         // 瞬断后已收到新预览，也须在本次续约之前撤销旧视觉流。
         HandleVisionInterruption();
-        // 先续约，再处理曲线、日志、参数表及界面通知；续约仍只来自活着的 UI。
+        // UI 先核验并签发有界续约许可，再处理曲线、日志和界面通知。
         SetUiStage("续租提交");
         _ = LeaseAsync(state);
         currentUiTick.LeaseSubmitted = leaseSubmitted;
@@ -570,10 +570,14 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         var revision = UiLeaseRevision(state);
         lastLeaseDecision = LeaseBlockReason(state);
         if (currentUiTick is { } tick && tick.SessionId == state.SessionId) tick.LeaseDecision = lastLeaseDecision;
-        if (lastLeaseDecision != "UI 提交续约" || revision is null) return;
+        if (lastLeaseDecision != "UI 提交续约" || revision is null)
+        {
+            if (lastLeaseDecision != "等待租约应答") bridge.RevokeUiLease(lastLeaseDecision);
+            return;
+        }
         var started = Stopwatch.GetTimestamp();
         Task<JsonElement?> reply;
-        try { reply = bridge.SendAsync("lease", state.SessionId, revision.Value, timeoutMs: 150); }
+        try { reply = bridge.RenewUiLeaseAsync(state, revision.Value); }
         catch (Exception ex) { reply = Task.FromException<JsonElement?>(ex); }
         var request = new LeaseRequest(state, revision.Value, started, reply);
         pendingLease = request;
@@ -673,6 +677,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
 
     private void ResetLeaseSession()
     {
+        bridge.RevokeUiLease("新会话重置许可");
         pendingLease = null;
         acknowledgedTargetRevision = -1;
         targetLeaseHandoffPending = false;
@@ -763,6 +768,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
             streamNodes,
             startingPositionNode = StartingPositionNode,
             authorizationValidBeforeStop = authorizationValid,
+            boundedUiLease = bridge.UiLeaseDiagnostic,
             axes = evidence?.Axes.Select(a => new
             {
                 a.Node, a.Connected, a.Valid, a.Enabled, a.Gate, a.Phase,
@@ -773,6 +779,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
             recentTransport = SessionTransport(),
             note = "自动安全停机提交前的本会话证据；后续急停反馈不覆盖首因，不证明现场原始CAN时序"
         }, Protocol.Json);
+        bridge.RevokeUiLease("安全停机撤销许可");
         motorProtectionReason = reason;
         motorProtectionSummary = summary ?? ProtectionFirstCause;
         foreach (var axis in Axes.Where(a => axisSession == session && (a.State.Connected || a.State.Enabled) || a.Node == StartingPositionNode))
@@ -1158,7 +1165,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
         catch (UnauthorizedAccessException) { }
         return JsonSerializer.SerializeToElement(new
         {
-            controlRevision = "ui-lease-sliced-presentation-v1",
+            controlRevision = "ui-lease-bounded-permit-v2",
             assemblyPath = assembly.Location, moduleVersionId = assembly.ManifestModule.ModuleVersionId.ToString(),
             assemblyVersion = assembly.GetName().Version?.ToString(), sha256 = hash,
             fingerprintSource = "首个桌面视图构造时磁盘指纹；MVID 来自加载程序集，不是硬件固件版本",
@@ -1281,6 +1288,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
                     uiStages = new Dictionary<string, double>(uiStages), lastLeaseDecision,
                     presentationQueued, presentationStage, presentationDurationMs, firstPresentationFailure,
                     firstRequestTimeout = bridge.FirstTimeout,
+                    boundedUiLease = bridge.UiLeaseDiagnostic,
                     recentTransport = SessionTransport(),
                     firstLeaseFailure,
                     firstUiProtection,
@@ -1302,6 +1310,7 @@ public partial class MainViewModel : ObservableObject, IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (disposed) return;
+        bridge.RevokeUiLease("窗口关闭撤销许可");
         disposed = true; timer.Stop(); ClearLocalStream();
         vision.Changed -= WakeControlTargets;
         await bridge.DisposeAsync();

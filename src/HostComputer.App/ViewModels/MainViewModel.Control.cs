@@ -767,6 +767,7 @@ public partial class MainViewModel
     }
     private void ClearLocalStream()
     {
+        bridge.RevokeUiLease("本地流取消；撤销旧许可");
         controlEpoch++;
         streamGeneration = "";
         streamSource = "none";

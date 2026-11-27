@@ -973,6 +973,25 @@ class Engine:
         if action == "lease":
             if revision > self.revision:
                 raise ValueError("租约与当前意图不符")
+            permit = data.get("uiPermit")
+            if "uiPermit" in data:
+                if not isinstance(permit, dict):
+                    raise ValueError("UI续约许可非法")
+                # Windows QPC 与桌面 Stopwatch 共用单调时间基准；迟到消息不能延长许可。
+                remaining = finite(permit.get("deadline")) - time.perf_counter()
+                if not 0 < remaining <= .150001:
+                    raise ValueError("UI续约许可已过期或期限非法")
+                if self.latched or permit.get("generation") != self.streams.generation or permit.get("source") != self.streams.source:
+                    raise ValueError("UI续约许可流代次已失效")
+                tokens = permit.get("axisTokens")
+                if (not isinstance(tokens, dict) or set(tokens) != {str(n) for n in self.axes}
+                        or any(type(tokens[str(n)]) is not int or tokens[str(n)] != a.control_token
+                               for n, a in self.axes.items())):
+                    raise ValueError("UI续约许可轴令牌已失效")
+                # 请求即使写入成功，也须在后端实际处理时仍有效；保持原200ms租约窗口。
+                now = self.clock()
+                if time.perf_counter() >= permit["deadline"]:
+                    raise ValueError("UI续约许可在提交前已过期")
             self.lease_history.append({
                 "acceptedAt": time.time(), "revision": revision,
                 "gapMs": (now - self.lease_at) * 1000
@@ -1833,6 +1852,7 @@ class Engine:
             "firstProtection": self.first_protection,
             "periodMs": self.period_ms,
             "leaseCount": self.lease_count,
+            "uiLeasePermitVersion": 1,
             "lastLeaseRevision": self.last_lease_revision,
             "leaseAgeMs": (now - self.lease_at) * 1000
             if self.lease_count else None,

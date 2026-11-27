@@ -75,6 +75,9 @@ public interface IBridgeClient : IAsyncDisposable
     BridgeRequestTimeout? FirstTimeout => null;
     IReadOnlyList<BridgeTransportEvent> RecentTransport => [];
     JsonElement? RuntimeIdentity => null;
+    JsonElement? UiLeaseDiagnostic => null;
+    Task<JsonElement?> RenewUiLeaseAsync(BridgeState state, long revision) => SendAsync("lease", state.SessionId, revision, timeoutMs: 150);
+    void RevokeUiLease(string reason) { }
     void Start();
     Task<JsonElement?> SendAsync(string action, string session, long revision, object? data = null, int timeoutMs = 1000);
 }
@@ -99,7 +102,17 @@ public sealed class BridgeClient : IBridgeClient
         public readonly bool Stop = stop;
         public long WriteStarted, WriteCompleted;
         public double WriteBudgetMs;
+        public UiLeasePermit? Permit;
+        public long WriteDeadline => Permit is null ? Deadline : Math.Min(Deadline, Permit.Expires);
     }
+    // 只有 UI 核验能签发许可；监督线程只能使用原许可，不能刷新到期时间或生成目标。
+    private sealed record UiLeasePermit(long Epoch, string Session, long Revision, long SnapshotRevision,
+        string Generation, string Source, (int Node, long Token, bool Enabled)[] Axes, long Expires);
+    private sealed record BoundedLeaseRequest(Outbound Outbound, TaskCompletionSource<JsonElement> Reply);
+    private UiLeasePermit? uiPermit;
+    private BoundedLeaseRequest? boundedLease;
+    private long permitEpoch, nextBoundedLeaseAt, boundedLeaseSubmitted, boundedLeaseCompleted;
+    private string permitDecision = "未授权";
     private readonly Channel<Outbound> normal = Channel.CreateBounded<Outbound>(32);
     private readonly Channel<Outbound> urgent = Channel.CreateBounded<Outbound>(4);
     private readonly Channel<Outbound> leases = Channel.CreateBounded<Outbound>(4);
@@ -125,6 +138,143 @@ public sealed class BridgeClient : IBridgeClient
     public JsonElement? RuntimeIdentity { get; private set; }
     public string Error => Volatile.Read(ref error);
     public bool Running => process is { HasExited: false } && !lifetime.IsCancellationRequested;
+    public JsonElement? UiLeaseDiagnostic
+    {
+        get
+        {
+            lock (transportGate) return JsonSerializer.SerializeToElement(new
+            {
+                permitDecision, permitEpoch, permitWindowMs = 150, renewalPeriodMs = 50,
+                backendLeaseWindowMs = 200, nominalUiSilenceStopMs = 350,
+                remainingMs = uiPermit is { } p ? Math.Max(0, Stopwatch.GetElapsedTime(Stopwatch.GetTimestamp(), p.Expires).TotalMilliseconds) : 0,
+                sessionId = uiPermit?.Session, revision = uiPermit?.Revision,
+                boundedLeaseSubmitted, boundedLeaseCompleted, pending = boundedLease is not null,
+                note = "许可不由后台刷新；350ms是租约逻辑边界，不是Windows或机械停止的硬实时保证"
+            }, Protocol.Json);
+        }
+    }
+
+    public Task<JsonElement?> RenewUiLeaseAsync(BridgeState state, long revision)
+    {
+        Avalonia.Threading.Dispatcher.UIThread.VerifyAccess();
+        lock (transportGate)
+        {
+            var candidate = new UiLeasePermit(permitEpoch, state.SessionId, revision, state.Revision,
+                state.Stream.Generation, state.Stream.Source,
+                state.Axes.Select(a => (a.Node, a.ControlToken, a.Enabled)).ToArray(),
+                Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * .15));
+            if (!state.Active || !PermitSnapshotSafe(candidate, state) || !PermitSnapshotSafe(candidate, Latest))
+            {
+                RevokeUiLease(state.UiLeasePermitVersion != 1 ? "后端不支持有界许可；仅原UI续约" : "UI 未授予独立续约许可");
+                // 只读期及结构交接保留原 UI 续约，不开启后台保活。
+                return SendAsync("lease", state.SessionId, revision, timeoutMs: 150);
+            }
+            var same = uiPermit is { } old && old.Session == candidate.Session && old.Revision == candidate.Revision &&
+                old.Generation == candidate.Generation && old.Source == candidate.Source && old.Axes.SequenceEqual(candidate.Axes);
+            candidate = candidate with { Epoch = same ? permitEpoch : ++permitEpoch };
+            uiPermit = candidate; permitDecision = "UI 核验授予150ms许可";
+            nextBoundedLeaseAt = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * .05);
+            return SendCoreAsync("lease", state.SessionId, revision, PermitData(candidate), 150, candidate);
+        }
+    }
+
+    public void RevokeUiLease(string reason)
+    {
+        lock (transportGate)
+        {
+            if (uiPermit is not null) { ++permitEpoch; uiPermit = null; }
+            permitDecision = reason;
+        }
+    }
+
+    private static object PermitData(UiLeasePermit permit) => new { uiPermit = new
+    {
+        // Windows 下 .NET Stopwatch 与 Python perf_counter 共用 QPC；不使用可跳变的墙钟。
+        deadline = permit.Expires / (double)Stopwatch.Frequency,
+        generation = permit.Generation, source = permit.Source,
+        axisTokens = permit.Axes.ToDictionary(a => a.Node.ToString(), a => a.Token)
+    } };
+
+    private static bool PermitSnapshotSafe(UiLeasePermit permit, BridgeState? state)
+    {
+        if (state is not { Mode: "hardware", Connected: true, Active: true, Fault: "", UiLeasePermitVersion: 1 } ||
+            !Protocol.IsFresh(state, DateTimeOffset.UtcNow) || state.SessionId != permit.Session ||
+            state.Revision < permit.SnapshotRevision || state.Revision > permit.Revision ||
+            state.EstopRecovery.Pending || state.UnownedStop.Pending ||
+            state.Stream.Generation != permit.Generation || state.Stream.Source != permit.Source ||
+            state.Axes.Length != permit.Axes.Length) return false;
+        var snapshotAge = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - state.Time * 1000);
+        foreach (var (node, token, enabled) in permit.Axes)
+        {
+            var axis = state.Axes.FirstOrDefault(a => a.Node == node);
+            if (axis is null || axis.ControlToken != token || axis.Enabled != enabled) return false;
+            // 未接管故障轴须有新鲜门极关闭证据；不把它升级为其它轴的故障。
+            var closedObserver = !enabled && !state.Stream.Nodes.Contains(node) && axis.Connected && axis.Valid && axis.Gate == false &&
+                axis.AgeMs is { } observerAge && double.IsFinite(observerAge) && observerAge >= 0 && observerAge + snapshotAge <= 200 &&
+                axis.Phase is not ("停止待确认" or "停机未确认");
+            if (!closedObserver && ViewModels.AxisViewModel.MotorSafetyIssue(axis, true).Length > 0) return false;
+            if (enabled && (axis.AgeMs is not { } age || !double.IsFinite(age) || age < 0 ||
+                age + snapshotAge > 200 || !axis.Valid)) return false;
+        }
+        return true;
+    }
+
+    private bool PermitWritable(Outbound outbound)
+    {
+        lock (transportGate) return outbound.Permit is not { } p ||
+            uiPermit?.Epoch == p.Epoch && Stopwatch.GetTimestamp() < p.Expires && PermitSnapshotSafe(p, Latest);
+    }
+
+    private void MaintainUiLease()
+    {
+        lock (transportGate)
+        {
+            if (boundedLease is { } pending)
+            {
+                var line = pending.Outbound;
+                if (pending.Reply.Task.IsCompleted)
+                {
+                    try
+                    {
+                        var reply = pending.Reply.Task.GetAwaiter().GetResult();
+                        if (reply.GetProperty("ok").GetBoolean()) ++boundedLeaseCompleted;
+                        else if (uiPermit?.Epoch == line.Permit?.Epoch) RevokeUiLease("后端拒绝有界续约");
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception ex) { Fail("有界续约通信异常：" + ex.Message); }
+                    requests.TryRemove(line.Id, out _); outboundRequests.TryRemove(line.Id, out _);
+                    boundedLease = null;
+                }
+                else if (Stopwatch.GetTimestamp() >= line.Deadline)
+                {
+                    var diagnostic = TimeoutDiagnostic(line);
+                    Interlocked.CompareExchange(ref firstTimeout, diagnostic, null);
+                    RecordTransport(line, "有界续约请求超时");
+                    Fail("有界续约通信超时；不再续约");
+                    return;
+                }
+            }
+            if (uiPermit is not { } permit || !Running) return;
+            if (Stopwatch.GetTimestamp() >= permit.Expires)
+            { RevokeUiLease("150ms UI许可到期；不再续约"); return; }
+            if (!PermitSnapshotSafe(permit, Latest))
+            { RevokeUiLease("最新会话、代次或反馈不再匹配许可"); return; }
+            if (boundedLease is not null || Stopwatch.GetTimestamp() < nextBoundedLeaseAt ||
+                outboundRequests.Values.Any(o => o.Action == "lease" && requests.ContainsKey(o.Id))) return;
+            var queuedAt = Stopwatch.GetTimestamp();
+            var id = Guid.NewGuid().ToString("N");
+            var tcs = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var body = JsonSerializer.Serialize(new { version = 1, requestId = id, sessionId = permit.Session,
+                revision = permit.Revision, action = "lease", data = PermitData(permit) }, Protocol.Json);
+            var outbound = new Outbound(body, id, "lease", permit.Session, "lease", queuedAt, 150, false) { Permit = permit };
+            requests[id] = tcs; outboundRequests[id] = outbound;
+            if (!leases.Writer.TryWrite(outbound))
+            { requests.TryRemove(id, out _); outboundRequests.TryRemove(id, out _); Fail("有界续约队列已满"); return; }
+            boundedLease = new(outbound, tcs); ++boundedLeaseSubmitted;
+            nextBoundedLeaseAt = queuedAt + (long)(Stopwatch.Frequency * .05);
+            RecordTransport(outbound, "有界续约入队"); writeReady.Set();
+        }
+    }
 
     /// <summary>
     ///查找桥接根目录（包含 bridge/server.py 的目录），优先使用 CBA03_HOST_ROOT 环境变量指定的路径
@@ -195,6 +345,7 @@ public sealed class BridgeClient : IBridgeClient
         if (Interlocked.CompareExchange(ref failed, 1, 0) != 0) return;
         Volatile.Write(ref error, message + "；停机未确认，须检查硬件急停与机械支撑");
         lifetime.Cancel();
+        RevokeUiLease("桥接失效；撤销许可");
         writeReady.Set();
         foreach (var tcs in requests.Values) tcs.TrySetException(new IOException(Error));
         // 关闭 stdin 不能与阻塞中的写入同步竞争；独立回收仅处理本应用创建的子进程。
@@ -233,7 +384,14 @@ public sealed class BridgeClient : IBridgeClient
                     var obj = doc.RootElement;
                     if (obj.GetProperty("version").GetInt32() != 1) throw new IOException("桥接版本不符");
                     if (obj.GetProperty("kind").GetString() == "state")
-                        Volatile.Write(ref latest, obj.Deserialize<BridgeState>(Protocol.Json));
+                    {
+                        lock (transportGate)
+                        {
+                            Volatile.Write(ref latest, obj.Deserialize<BridgeState>(Protocol.Json));
+                            if (uiPermit is { } permit && !PermitSnapshotSafe(permit, Latest))
+                                RevokeUiLease("新快照撤销旧续约许可");
+                        }
+                    }
                     else if (obj.TryGetProperty("requestId", out var id) && requests.TryRemove(id.GetString()!, out var tcs))
                     {
                         if (outboundRequests.TryGetValue(id.GetString()!, out var outbound)) RecordTransport(outbound, "收到应答");
@@ -279,10 +437,15 @@ public sealed class BridgeClient : IBridgeClient
                 {
                     if (lifetime.IsCancellationRequested) break;
                     var now = Stopwatch.GetTimestamp();
-                    if (!line.Stop && (!requests.ContainsKey(line.Id) || now >= line.Deadline))
-                    { RecordTransport(line, "写前拒绝过期"); continue; }
+                    if (!line.Stop && (!requests.ContainsKey(line.Id) || now >= line.WriteDeadline || !PermitWritable(line)))
+                    {
+                        RecordTransport(line, "写前拒绝过期");
+                        if (line.Permit is not null && requests.TryRemove(line.Id, out var cancelled))
+                            cancelled.TrySetCanceled();
+                        continue;
+                    }
                     line.WriteBudgetMs = line.Stop ? 150 : Math.Min(150,
-                        Stopwatch.GetElapsedTime(now, line.Deadline).TotalMilliseconds);
+                        Stopwatch.GetElapsedTime(now, line.WriteDeadline).TotalMilliseconds);
                     Interlocked.Exchange(ref line.WriteStarted, now);
                     inflight = line;
                     writerState = OperatingSystem.IsWindows() ? "同步写入" : "异步写入";
@@ -290,12 +453,14 @@ public sealed class BridgeClient : IBridgeClient
                 }
                 if (lifetime.IsCancellationRequested) break;
                 // 开始 I/O 前再核验原请求；监督与真实完成之间仍允许取消竞争，不刷新预算。
-                if (!line.Stop && (!requests.ContainsKey(line.Id) || Stopwatch.GetTimestamp() >= line.Deadline))
+                if (!line.Stop && (!requests.ContainsKey(line.Id) || Stopwatch.GetTimestamp() >= line.WriteDeadline || !PermitWritable(line)))
                 {
                     lock (transportGate)
                     {
                         RecordTransport(line, "写前拒绝过期");
                         inflight = null; Interlocked.Exchange(ref line.WriteStarted, 0);
+                        if (line.Permit is not null && requests.TryRemove(line.Id, out var cancelled))
+                            cancelled.TrySetCanceled();
                     }
                     continue;
                 }
@@ -358,6 +523,9 @@ public sealed class BridgeClient : IBridgeClient
                 FailWriteTimeout(expired);
                 if (lifetime.IsCancellationRequested) return;
             }
+            // 复用监督线程；有界续约不依赖 UI Dispatcher 或线程池的 Timer。
+            try { MaintainUiLease(); }
+            catch (Exception ex) { Fail("有界续约监督异常：" + ex.Message); }
             // 单调时钟独立监督；不使用依赖线程池的 Timer 作为取消保障。
             writerExited.Wait(5);
         }
@@ -507,7 +675,10 @@ public sealed class BridgeClient : IBridgeClient
     /// <exception cref="IOException"></exception>
     /// <exception cref="TimeoutException"></exception>
     /// <exception cref="InvalidOperationException"></exception>
-    public async Task<JsonElement?> SendAsync(string action, string session, long revision, object? data = null, int timeoutMs = 1000)
+    public Task<JsonElement?> SendAsync(string action, string session, long revision, object? data = null, int timeoutMs = 1000) =>
+        SendCoreAsync(action, session, revision, data, timeoutMs, null);
+
+    private async Task<JsonElement?> SendCoreAsync(string action, string session, long revision, object? data, int timeoutMs, UiLeasePermit? permit)
     {
         if (!Running) throw new IOException("桥接未运行：" + Error);
         if (timeoutMs <= 0) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
@@ -523,9 +694,11 @@ public sealed class BridgeClient : IBridgeClient
                 action == "lease" ? leases : normal;
             var outbound = new Outbound(line, id, action, session,
                 ReferenceEquals(channel, urgent) ? "urgent" : ReferenceEquals(channel, leases) ? "lease" : "normal",
-                queuedAt, timeoutMs, ReferenceEquals(channel, urgent));
+                queuedAt, timeoutMs, ReferenceEquals(channel, urgent)) { Permit = permit };
             lock (transportGate)
             {
+                if (action is not ("lease" or "stream_sample" or "parameters" or "ports"))
+                    RevokeUiLease("新操作撤销旧续约许可：" + action);
                 if (!Running) throw new IOException("桥接已失效：" + Error);
                 if (!channel.Writer.TryWrite(outbound)) throw new IOException("桥接发送队列已满");
                 outboundRequests[id] = outbound;
@@ -559,6 +732,7 @@ public sealed class BridgeClient : IBridgeClient
     /// <returns></returns>
     public async ValueTask DisposeAsync()
     {
+        RevokeUiLease("窗口关闭；撤销许可");
         if (process == null || Interlocked.Exchange(ref disposing, 1) != 0) return;
         if (Running && Latest is { } state)
         {

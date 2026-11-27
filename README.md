@@ -7,6 +7,7 @@
 
 ## 目录
 
+- [界面截图](#界面截图)
 - [1. 项目定位与功能边界](#1-项目定位与功能边界)
 - [2. 项目结构与数据链路](#2-项目结构与数据链路)
 - [3. 环境与硬件要求](#3-环境与硬件要求)
@@ -23,6 +24,28 @@
 - [14. 发布与交付检查](#14-发布与交付检查)
 - [15. 开发约束与已知限制](#15-开发约束与已知限制)
 - [16. 原厂资料与许可证](#16-原厂资料与许可证)
+
+## 界面截图
+
+以下截图用于展示对应版本的界面，部分控件可能与当前源码不同；现行操作与安全边界以本文说明为准，截图不代替实机验收或故障诊断。
+
+### 1. 运动模拟仿真
+
+口腔灯三关节模型与视觉跟随界面；模型运动不代表真实电机已转动或到位。
+
+![运动模拟仿真](screen/1.运动模拟仿真.png)
+
+### 2. 电机控制上位机
+
+三轴位置表盘、独立启停按钮、目标滑条、实时曲线及参数快照界面。
+
+![电机控制上位机](screen/2.电机控制上位机.png)
+
+### 3. 急停锁止异常
+
+展示急停状态与各轴异常图标；急停位不能单独证明最初故障原因，实际停机状态仍须核验。
+
+![急停锁止异常](screen/3.急停锁止异常.png)
 
 ## 1. 项目定位与功能边界
 
@@ -65,6 +88,10 @@ HostComputer/
 │   └── control_stream.py              # 手动/视觉流、令牌及失锁状态机
 ├── profiles/
 │   └── screenshot-reference.json      # 参数表截图参考；不是在线参数
+├── screen/                            # README 界面截图
+│   ├── 1.运动模拟仿真.png
+│   ├── 2.电机控制上位机.png
+│   └── 3.急停锁止异常.png
 ├── src/
 │   ├── HostComputer.Core/             # 状态模型、协议契约和曲线缓冲
 │   └── HostComputer.App/
@@ -415,7 +442,8 @@ $VisionRoot = [System.IO.Path]::GetFullPath((Join-Path $HostRoot '..\..\..\..\Ge
 | 桌面桥接快照新鲜度 | 年龄 <150ms，允许有限未来偏差 | 界面授权依据，后台收到不等于 UI 已消费 |
 | 连续目标 / lease 桌面应答 | 150ms | 排队、管道写入、应答等待共用请求预算 |
 | 桌面单次管道写入 | 最多 150ms；非停止类另取原请求剩余预算 | 排队后不刷新 deadline；停止类不因排队过期丢弃 |
-| UI 租约 | 超过 200ms 未有效续约 | UI 控制授权失效，活动轴安全保护 |
+| 后端 UI 租约 | 超过 200ms 未有效续约 | 保护门限不变；有界后台续约也须通过许可核验 |
+| UI 签发的独立续约许可 | 最多 150ms；监督线程约每 50ms 使用一次 | 后台不能延长许可、生成目标或使能；UI 完全停顿后的租约逻辑上界约为 350ms |
 | 电机位置/状态/门极 | 各 ≤200ms；故障字另要求 ≤1s | 轴有效反馈判据 |
 | 静止证据 | 500ms 窗口至少 6 个新采样，再确认 200ms | 静止不是仅看一次速度接近零；采样间隔另须合格 |
 | 视觉原采集 | ≤300ms | 不由心跳、发布时刻或旧帧重发刷新 |
@@ -429,21 +457,27 @@ $VisionRoot = [System.IO.Path]::GetFullPath((Join-Path $HostRoot '..\..\..\..\Ge
 
 ### UI 安全消费与分片展示
 
-- 50ms、Input 优先级的 UI 周期仍消费快照，核验故障/会话、收割已完成租约应答并提交合法续租，再更新基本轴读数、目标、按钮和禁用原因。直接开流/目标应答交接同样先收割旧应答；后台任务完成不能自行周期续租。
+- 50ms、Input 优先级的 UI 周期仍消费快照，核验故障/会话、收割已完成租约应答并提交合法续租，再更新基本轴读数、目标、按钮和禁用原因。直接开流/目标应答交接同样先收割旧应答；只有经过 UI 核验的许可允许短时间独立续约。
 - 三轴长文本/详细诊断、曲线重绘、日志格式化、参数集合和已展开的保护详情通过单个合并调度入口，在 Background 优先级按阶段轮转；每片日志格式化/参数集合应用最多16条或行。连续日志到来不重置尚未完成的格式化批次，完成后再展示最新有界缓存。
 - 原始曲线逐新快照采样，不因展示合并丢掉已消费的采样；日志原始缓存最多200条，JSON 导出直接读取它，不等待界面日志完成。参数行提交集合时重新核验读回有效性和采集过期；换轴、换组、新会话和关闭不会复活旧展示或旧控制。
 - 先记录触发轮次，再核验安全并冻结首保护；当次阶段与累计最大 UI 耗时分开。已结束的 UI tick 记录不被后来的交接改写，展示异常另列，不覆盖电机/通信首因。
 
-分片仍在同一 UI 线程；只能让高优先级任务在片段之间先执行，不能抢占一个正在执行的同步通知、渲染或 Windows 调度停顿。真正 UI 卡死/失联仍停止续租并触发原保护；没有扩大150/200ms门限，也没有后台无条件代续租。离线请求次数与 Headless 焦点切换测试不证明实机最大续租间隙。
+分片仍在同一 UI 线程；只能让高优先级任务在片段之间先执行，不能抢占一个正在执行的同步通知、渲染或 Windows 调度停顿。微信 Alt+A 的当次 JSON 记录了约215ms UI 调度空档、218ms后端租约保护，管道写入和应答未超时。有界许可针对这一短空档，不能承诺任意截屏、睡眠或长时间冻结都不断控。离线回归不代替现场验收。
 
 ### Windows 管道写入与监督
 
 - Windows 唯一独立写线程同步写完整 UTF-8 JSON Lines 并 flush，不逐帧等待 ThreadPool 异步写入。入队事件立即唤醒；空闲 `WaitOne(50)` 不是固定发送延迟。仍按 urgent→lease→normal 使用原有有界队列，不增加队列容量、CAN 线程或生产 ThreadPool 配额。
-- 独立监督线程每 5ms 按单调时钟检查在途写入；非停止写预算为 `min(150ms, 原请求剩余预算)`，写前再次核验有效性。超限封闭写泵、结束通信授权，部分 JSON 不重试，旧目标不补发。
+- 独立监督线程每 5ms 按单调时钟检查在途写入；非停止写预算为 `min(150ms, 原请求剩余预算, 带许可请求的许可剩余时间)`，写前再次核验有效性。超限封闭写泵、结束通信授权，部分 JSON 不重试，旧目标不补发。
 - Windows 通过 SafeHandle 管理自有写线程句柄，`CancelSynchronousIo` 的返回只表示取消请求结果。`ERROR_NOT_FOUND` 按开始/完成竞争处理，必须再次核验真实完成和写线程退出；取消异常不能抢先覆盖当次超时诊断。
 - 取消后仍未退出则有界回收本实例自有 bridge，最多等待 800ms 后使用自有进程回收兜底。关闭窗口不无限等待写线程；结束 Python 进程不是机械停止确认，未知输出仍提示“停机未确认”。非 Windows 保留有界异步路径，本轮不新增跨平台验收承诺。
 
-续租仍只由活着且已消费新鲜快照的 UI 发起；写线程和监督线程不自行无限续租。150/200/50/300ms 请求、授权、活动调度和原采集判据保持不变。
+### 截屏短空档的有界独立续约
+
+- 活动会话仅在 UI 核验新鲜快照、已确认 revision、当前流身份及轴令牌后授予最多150ms不可变许可。复用独立监督线程，约每50ms发送一次 lease；不使用 UI Dispatcher/线程池 Timer，不新增 CAN 执行线程，不生成或重放目标，不使能。
+- 后台每次核验最新快照的会话、revision、generation/source、全轴令牌与受控状态、反馈和故障。到期、撤权、断开、取消、结构操作或保护立即撤销旧许可；仅新的 UI 核验可签发下一份。排队请求写前与后端实际处理时均核验原截止时间，接收/回复不能刷新它。
+- Windows `.NET Stopwatch` 与 Python `time.perf_counter()` 以同一 QPC 单调基准检查绝对截止时间；后端快照须声明 `uiLeasePermitVersion=1`。旧后端不启用后台续约，只保留原 UI lease，并在诊断中标明兼容回退。
+- **后端200ms门限未修改，但 UI 完全卡死后的保护响应逻辑边界由约200ms延长至最多约150+200=350ms，再受实际 tick/调度影响。** 350ms不是 Windows、CAN 输出关闭或机械停止的硬实时保证。真实通信超时、活动调度50ms、电机反馈与视觉原采集300ms保护仍保留；保护后不会自动恢复运动。
+- 导出 `diagnostics.transport.boundedUiLease` 可查看许可剩余时间、撤销原因、后台提交/完成数及边界；桌面加载指纹 `controlRevision=ui-lease-bounded-permit-v2`。必须同步加载新版桌面和后端；已有现场进程与旧发布包不会由源码修改自动更新。
 
 ### 会话、版本与流隔离
 
@@ -496,6 +530,7 @@ JSON 导出本身不续租、不发令，按导出时的 UI 已消费快照冻�
 | `transport.latestFresh、latestRevision、uiConsumptionLagMs` | 区分后台接收与 UI 消费滞后 |
 | `transport.authorizationValid、intentRevision、acknowledgedStreamRevision` | 授权和结构请求版本交接 |
 | `transport.firstRequestTimeout` | 进程级历史首超时，区分发送排队、管道写入和等待应答；不能替代当前 lease 首因 |
+| `transport.boundedUiLease` | UI 许可期限/代次、剩余时间、撤销原因、后台续约提交/完成数及在途状态；200ms 后端门限与约350ms逻辑边界分列 |
 | `transport.firstLeaseFailure.currentRequestTimeout、historicalFirstRequestTimeout` | 当次诊断异常证据与历史首超时分列；当次缺失时明确未知，不借用历史归因 |
 | `transport.firstLeaseFailure、firstUiProtection、recentUiTicks` | 首次续约失败、UI 首保护与最近16轮时序；触发轮次先入队再核验，自动安全停机在撤权、清流和发送急停前冻结首因，`authorizationValidBeforeStop` 保留撤权前状态 |
 | `transport.uiStage、uiStages、lastLeaseDecision` | 本次 UI 阶段、阶段耗时与具体续租提交/阻断原因；等待应答、版本、快照过期及后台故障分别记录 |
@@ -588,7 +623,17 @@ npm.cmd --prefix $WebRoot run build
 & (Join-Path $VisionRoot '.venv\Scripts\python.exe') -X utf8 -m unittest discover -s (Join-Path $VisionRoot 'tests') -p 'test_*.py'
 ```
 
-### 本次手动拖动 UI 租约修复验证
+### 本次微信 Alt+A 截屏有界续约验证
+
+结果集中于 `artifacts/capture-lease-v2/verification/`：[Python](artifacts/capture-lease-v2/verification/python-tests.json) 245/245、[Release 桌面全量](artifacts/capture-lease-v2/verification/desktop.trx) 545/545、[有界续约专项](artifacts/capture-lease-v2/verification/bounded-ui-lease-v7.trx) 16/16，均通过。全量包含三端合成契约、原图标/图文按钮/多尺寸布局及既有运动安全回归。[Debug/Release win-x64 构建](artifacts/capture-lease-v2/verification/build-Build.json) 通过；独立产物目录为 `artifacts/capture-lease-v2/build`，不改变默认源码入口或发布包。
+
+新增8项 Python 内存 CAN 用例覆盖215ms空档、原许可不自延长、200ms租约保护、提交前再次核验截止时间、旧会话/revision/来源/逐轴令牌、后端排队过期、逐轴停止及真实故障/调度保护。16项桌面专项使用真实匿名管道、真实 Windows QPC 和 Avalonia UI `Thread.Sleep(215)`，验证后台续约交付、截图返回后重新签发许可、自然到期不自续、不自动重启，以及最新安全变化、旧后端回退、主动取消、真正排队到期、150ms应答超时和非UI签发拒绝。
+
+管道用例的 CAN 执行时间使用既有确定性内存时钟，避免宿主调度抖动先触发50ms保护而混淆待测许可；跨进程截止时间和UI阻塞仍使用真实时钟。初始化预算不改变生产期限。早期 `bounded-ui-lease*.trx` 失败记录保留，其中子进程EOF已由独立stderr定位为夹具误用Python `true/false` 的 `NameError` 并修正；冷启动、快照到达与诊断导出的不同瞬间分别核验，不把导出后的剩余期限当作此前状态。最终以 `bounded-ui-lease-v7.trx` 和 `desktop.trx` 为准，不能以此前11/15或内存测试单独宣称完整验收。
+
+当前完成源码修复与离线验证，未 Publish/All、覆盖旧发布包、更新默认入口、重启现场应用/视觉服务、打开实体串口/相机、清错、置零、使能或试转。现场微信截图仍须人工加载同一新版桌面和后端后复验，保留同会话JSON的加载指纹、UI时序和 `boundedUiLease`。150ms有界许可将UI完全卡死后的租约逻辑边界延长至约350ms；真实故障、50ms活动调度、电机反馈及300ms视觉保护保持，离线测试不证明Windows或机械停止的硬实时性能。
+
+### 此前手动拖动 UI 租约修复验证
 
 本次结果位于 `artifacts/verification/ui-lease/`：[Python](artifacts/verification/ui-lease/python-tests.json) 237/237、[Release 桌面全量](artifacts/verification/ui-lease/desktop-final.trx) 509/509、[最终专项](artifacts/verification/ui-lease/target-final.trx) 45/45，均通过。[Debug/Release win-x64 构建](artifacts/verification/ui-lease/build-Build.json) 通过，独立产物目录为 `artifacts/ui-lease-build`。源码 `Start.ps1 -CheckOnly` 通过，仅确认默认入口及依赖存在；独立构建不更新默认入口、旧发布包或已运行程序。
 

@@ -190,6 +190,7 @@ public sealed record BridgeState
     public JsonElement? FirstProtection { get; init; }
     public double? LeaseAgeMs { get; init; }
     public long LeaseCount { get; init; }
+    public int UiLeasePermitVersion { get; init; }
     public long LastLeaseRevision { get; init; } = -1;
     public double PeriodMs { get; init; }
     public double Time { get; init; }
